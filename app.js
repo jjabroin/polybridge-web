@@ -25,7 +25,7 @@ let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
 //  구조 매핑: 거더교=road+하부보강 / 트러스교(Warren·Pratt)=wood·steel 삼각형 /
 //            아치교=steel 압축아치 / 현수교=cable+타워 / 사장교=타워+방사형cable
 const MATERIALS = {
-  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.12, breakC: -0.10, stiff: 1.0,  wpp: 0.030, maxLen: 80,  minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
+  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.12, breakC: -0.10, stiff: 1.0,  wpp: 0.030, maxLen: 120, minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
   wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.7,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false },
   steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false },
   cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true },
@@ -1057,7 +1057,7 @@ function drawPreview() {
   const a = mouse.startNode, b = mouse.cur;
   const len = Math.hypot(a.x - b.x, a.y - b.y);
   const M = MATERIALS[curMat];
-  const ok = len >= M.minLen && len <= M.maxLen && !(a.node && b.node && (a.node === b.node || beamExists(a.node, b.node)));
+  const ok = len >= M.minLen && len <= M.maxLen && !(a.node && b.node && (a.node === b.node || beamExists(a.node, b.node, curMat)));
   ctx.strokeStyle = ok ? 'rgba(105,240,174,.9)' : 'rgba(244,67,54,.9)';
   ctx.lineWidth = M.thick; ctx.setLineDash([8, 5]);
   ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
@@ -1193,12 +1193,7 @@ canvas.addEventListener('pointermove', e => {
     else mouse.cur = snapPoint(p.wx, p.wy);
     if (tool === 'move' && mouse.dragNode && mouse.down) {
       const sp = snapPoint(p.wx, p.wy);
-      mouse.dragNode.x = clamp(sp.x, 0, W); mouse.dragNode.y = clamp(sp.y, 0, H);
-      for (const b of beams) {
-        if (b.a === mouse.dragNode || b.b === mouse.dragNode)
-          b.rest = Math.hypot(b.a.x - b.b.x, b.a.y - b.b.y);
-      }
-      refreshMasses();
+      if (tryMoveNode(mouse.dragNode, clamp(sp.x, 0, W), clamp(sp.y, 0, H))) refreshMasses();
     }
     if (tool === 'erase' && mouse.down) eraseAt(p.wx, p.wy, true);
     mouse.hoverBeam = null;
@@ -1218,6 +1213,21 @@ window.addEventListener('pointerup', e => {
   if (mouse.dragNode) { weldNodes(); refreshMasses(); updateHUD(); }
   mouse.startNode = null; mouse.dragNode = null;
 });
+// 노드 이동 + 연결 빔 길이 제한 검증 (초과 시 원위치 — 공짜 늘이기 방지)
+function tryMoveNode(dn, x, y) {
+  const ox = dn.x, oy = dn.y;
+  dn.x = x; dn.y = y;
+  for (const b of beams) {
+    if (b.a !== dn && b.b !== dn) continue;
+    const M = MATERIALS[b.mat];
+    const l = Math.hypot(b.a.x - b.b.x, b.a.y - b.b.y);
+    if (l > M.maxLen + 0.5 || l < M.minLen - 0.5) { dn.x = ox; dn.y = oy; return false; }
+  }
+  for (const b of beams) {
+    if (b.a === dn || b.b === dn) b.rest = Math.hypot(b.a.x - b.b.x, b.a.y - b.b.y);
+  }
+  return true;
+}
 function tryBuild(a, b) {
   const M = MATERIALS[curMat];
   const len = Math.hypot(a.x - b.x, a.y - b.y);
