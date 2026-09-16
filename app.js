@@ -10,7 +10,7 @@
 const W = 1280, H = 720;
 const GRAV = 1500;            // px/s^2
 const FIXED_DT = 1 / 60;
-const ITER = 18;              //constraint 반복 (트램펄린 억제)
+const ITER = 30;              // constraint 반복 (정적 처짐·트램펄린 억제)
 const GRID = 20;
 
 const canvas = document.getElementById('game');
@@ -26,7 +26,7 @@ let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
 //            아치교=steel 압축아치 / 현수교=cable+타워 / 사장교=타워+방사형cable
 const MATERIALS = {
   road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.20, breakC: -0.13, stiff: 1.0,  wpp: 0.030, maxLen: 120, minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
-  wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.7,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false },
+  wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.8,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false },
   steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false },
   cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true },
 };
@@ -38,9 +38,9 @@ const MAT_ORDER = ['road', 'wood', 'steel', 'cable'];
 //  - 바퀴: 고마찰 타이어, 섀시-바퀴 충돌 그룹 분리(서스펜션으로만 연결)
 //  - 액슬: Matter는 강체(stiffness 1)지만 우리 지형(다리 이음매) 대응을 위해 짧고 단단한 서스펜션으로 대체
 const CARS = {
-  light: { name: '🚗 경차', w: 76, h: 20, wheelR: 15, mass: 10, motor: 800, top: 185, color: '#ff5252' },
-  suv:   { name: '🚙 SUV',  w: 90, h: 24, wheelR: 17, mass: 15, motor: 1000, top: 170, color: '#26a69a' },
-  truck: { name: '🚚 트럭', w: 112, h: 27, wheelR: 18, mass: 24, motor: 1250, top: 150, color: '#ffa000' },
+  light: { name: '🚗 경차', w: 76, h: 20, wheelR: 15, mass: 10, motor: 800, top: 135, color: '#ff5252' },
+  suv:   { name: '🚙 SUV',  w: 90, h: 24, wheelR: 17, mass: 15, motor: 1000, top: 125, color: '#26a69a' },
+  truck: { name: '🚚 트럭', w: 112, h: 27, wheelR: 18, mass: 24, motor: 1250, top: 112, color: '#ffa000' },
 };
 const CAR_ORDER = ['light', 'suv', 'truck'];
 
@@ -89,6 +89,7 @@ let showGrid = true, showStress = true;
 let undoStack = [], redoStack = [];
 let mouse = { sx: 0, sy: 0, wx: 0, wy: 0, down: false, rdown: false, startNode: null, cur: null, hoverBeam: null, dragNode: null, moved: false };
 let loseTimer = 0, stuckTimer = 0, flipTimer = 0, goalTimer = 0;
+let stuckX = 0, stuckT = 0;
 let simOverBudget = false;
 let flagWave = 0;
 
@@ -130,6 +131,9 @@ function terrainSegs() {
   segs.push({ x1: L.left, y1: L.roadY, x2: L.left, y2: H + 50 });
   segs.push({ x1: L.right, y1: H + 50, x2: L.right, y2: L.roadY });
   segs.push({ x1: L.right, y1: L.roadY, x2: W + 50, y2: L.roadY, ground: true });
+  // 절벽 모서리 모따기 (둥근 교대): 처짐으로 낮아진 차체가 수직 벽에 박히지 않고 비탈을 타고 오름
+  segs.push({ x1: L.left, y1: L.roadY, x2: L.left + 18, y2: L.roadY + 5 });
+  segs.push({ x1: L.right, y1: L.roadY, x2: L.right - 18, y2: L.roadY + 5 });
   if (L.island) {
     const ix = L.island.x, iw = L.island.w, it = L.island.top;
     segs.push({ x1: ix, y1: it, x2: ix + iw, y2: it, ground: true });
@@ -253,7 +257,7 @@ function deserialize(json) {
   nodes = []; beams = []; nodeSeq = 1; beamSeq = 1;
   for (const n of d.nodes) { const nd = addNode(n.x, n.y, n.fixed, n.anchor); }
   for (const b of d.beams) {
-    if (nodes[b.a] && nodes[b.b] && !beamExists(nodes[b.a], nodes[b.b]))
+    if (nodes[b.a] && nodes[b.b] && !beamExists(nodes[b.a], nodes[b.b], b.mat))
       beams.push({ id: beamSeq++, a: nodes[b.a], b: nodes[b.b], mat: b.mat, rest: Math.hypot(nodes[b.a].x - nodes[b.b].x, nodes[b.a].y - nodes[b.b].y), broken: false, strain: 0 });
   }
   refreshMasses();
@@ -268,16 +272,14 @@ function defaultBridge() {
     if (!amap.has(key)) amap.set(key, addNode(ax, ay, true, true));
   }
   // 도로 상판: left->right 균등 분할 (끝점 보장, 격자 40px 배수 간격)
-  // 원리: 도로 윗면(주행면)을 절벽면과 일치시킴 — 빔 충돌면(중심선-19px)과 지형면(15px)의
-  //  4px 진입턱을 없애기 위해 중간 노드는 +4px 내림. 끝점은 앵커(roadY) 공유로 하중을 절벽에 직접 전달.
+  // 원리: 끝점은 앵커 공유로 하중을 절벽에 직접 전달. 주행면 일치는 충돌 반경 쪽에서 맞춤.
   const segs = Math.max(1, Math.round((L.right - L.left) / 40));
   let prev = null;
   for (let i = 0; i <= segs; i++) {
     const xx = L.left + (L.right - L.left) * i / segs;
-    const isEnd = (i === 0 || i === segs);
-    const yy = isEnd ? L.roadY : L.roadY + 4;
-    let n = isEnd ? amap.get(xx + ',' + L.roadY) : null;
-    if (!n) n = addNode(xx, yy, false, false);
+    const key = xx + ',' + L.roadY;
+    let n = amap.get(key);
+    if (!n) n = addNode(xx, L.roadY, false, false);
     if (prev && !beamExists(prev, n)) beams.push({ id: beamSeq++, a: prev, b: n, mat: 'road', rest: Math.hypot(prev.x - n.x, prev.y - n.y), broken: false, strain: 0 });
     prev = n;
   }
@@ -308,13 +310,16 @@ function spawnCar() {
     m: spec.mass * m, w: spec.w, h: spec.h,
     I: spec.mass * m * (spec.w * spec.w + spec.h * spec.h) / 12,
     wheels: [-1, 1].map(s => ({
-      ox: s * (spec.w / 2 - 18), oy: spec.h / 2 + 10,
-      x: sx + s * (spec.w / 2 - 18), y: sy + spec.h / 2 + 10,
+      ox: s * (spec.w / 2 - 18), oy: spec.h / 2 + 8,
+      x: sx + s * (spec.w / 2 - 18), y: sy + spec.h / 2 + 8,
       vx: 0, vy: 0, r: spec.wheelR, m: 2.2 * m, spin: 0, contact: false,
     })),
-    restLen: 14, K: 1400, D: 70, contactT: 0, airT: 0,
+    // 짧고 단단한 서스펜션 (Matter식 리지드 액슬에 근접 — 출렁임·데드존 없음)
+    // D는 sqrt 스케일 (명시적 오일러 안정 한계 D·dt/m < 2 준수)
+    restLen: 10, K: 3250 * spec.mass * m / 10, D: 120 * Math.sqrt(spec.mass * m / 10), contactT: 0, airT: 0,
   };
   dispatched = true; stuckTimer = 0; flipTimer = 0; goalTimer = 0; loseTimer = 0;
+  stuckX = sx; stuckT = simTime;
   sndClick();
   toast(spec.name + ' 출발! 🏁');
 }
@@ -348,14 +353,15 @@ function circleSeg(cx, cy, r, s) {
   return { nx: dx / d, ny: dy / d, pen: r - d, t, qx, qy };
 }
 function pushBeamNodes(beam, t, ix, iy, posK, velK) {
+  // 작용-반작용: 바퀴가 밀려난 반대 방향으로 빔을 민다 (빔이 차를 들어올리면 안 됨)
   const A = beam.a, B = beam.b;
   const wa = 1 - t, wb = t;
   const aFix = A.fixed ? 0 : 1, bFix = B.fixed ? 0 : 1;
   const tot = wa * aFix + wb * bFix || 1;
-  if (!A.fixed) { A.x += ix * wa * posK / tot * (aFix ? 1 : 0) * 2; A.px -= ix * wa * velK / tot * FIXED_DT * 60 * 0.02; A.py -= iy * wa * velK / tot * FIXED_DT * 60 * 0.02; }
-  if (!B.fixed) { B.x += ix * wb * posK / tot * 2; B.px -= ix * wb * velK / tot * FIXED_DT * 60 * 0.02; B.py -= iy * wb * velK / tot * FIXED_DT * 60 * 0.02; }
-  if (!A.fixed) A.y += iy * wa * posK / tot * 2;
-  if (!B.fixed) B.y += iy * wb * posK / tot * 2;
+  if (!A.fixed) { A.x -= ix * wa * posK / tot * (aFix ? 1 : 0) * 2; A.px += ix * wa * velK / tot * FIXED_DT * 60 * 0.02; A.py += iy * wa * velK / tot * FIXED_DT * 60 * 0.02; }
+  if (!B.fixed) { B.x -= ix * wb * posK / tot * 2; B.px += ix * wb * velK / tot * FIXED_DT * 60 * 0.02; B.py += iy * wb * velK / tot * FIXED_DT * 60 * 0.02; }
+  if (!A.fixed) A.y -= iy * wa * posK / tot * 2;
+  if (!B.fixed) B.y -= iy * wb * posK / tot * 2;
 }
 function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
   // 지형 + 빔과 충돌. out: {x,y,vx,vy,contact,beam,t,nx,ny,pen}
@@ -374,9 +380,9 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
       contact = true; hnx = c.nx; hny = c.ny;
       if (c.pen > bestPen) bestPen = c.pen;
     } else if (c.pen > -SLOP) {
-      // 정지 접촉: 작은 침투 속 제거 + 구름 마찰
+      // 정지 접촉: 작은 침투 속 제거 + 구름 마찰 (미세 진동은 무시 — 채터링 방지)
       const vn = vx * c.nx + vy * c.ny;
-      if (vn < 0 && vn > -80) { vx -= c.nx * vn; vy -= c.ny * vn; }
+      if (vn < -5 && vn > -80) { vx -= c.nx * vn; vy -= c.ny * vn; }
       vx *= 0.999;
       contact = true; hnx = c.nx; hny = c.ny;
       if (c.pen > bestPen) bestPen = c.pen;
@@ -387,11 +393,17 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
     const M = MATERIALS[b.mat];
     if (mode === 'car' && !M.collideCar) continue;  // 차량은 도로만 밟는다
     if (mode !== 'car' && M.noCollide) continue;    // 케이블은 만질 수 없는 이상적 인장재
-    const th = M.thick / 2 + r * 0.9;
+    // 차량 바퀴는 도로 윗면(시각적 표면)에 맞춤: 두께 절반+반지름-3.5 → 절벽면과 1px 내로 일치 (진입턱 제거).
+    // 타이어가 3.5px 묻히는 건 서스펜션 스쿼트로 보임. 섀시·화물은 정확한 접촉 유지.
+    const isWheel = (mode === 'car' && r > 10);
+    const th = M.thick / 2 + r * (isWheel && b.mat === 'road' ? 1 : 0.9) - (isWheel && b.mat === 'road' ? 3.5 : 0);
     const s = { x1: b.a.x, y1: b.a.y, x2: b.b.x, y2: b.b.y };
-    const c = circleSeg(x, y, th, s);
-    // 차량은 빔 끝단 캡을 무시 (이음매 턱 발사 방지 — 직선 구간 내부하고만 충돌)
-    if (mode === 'car' && (c.t <= 0.002 || c.t >= 0.998)) continue;
+    let c = circleSeg(x, y, th, s);
+    // 고정단 캡 축소: 교대에 묻힌 도로 끝단은 주행선 아래로 가라앉혀 볼라드 방지
+    if (mode === 'car' && b.mat === 'road' && (c.t <= 0.03 || c.t >= 0.97)) {
+      const en = c.t <= 0.03 ? b.a : b.b;
+      if (en.fixed) c = circleSeg(x, y, M.thick / 2 + r - 8, s);
+    }
     if (c.pen > 0) {
       const px = c.nx * c.pen, py = c.ny * c.pen;
       x += px; y += py;
@@ -402,7 +414,7 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
       pushBeamNodes(b, c.t, px, py, 0.22, 1.0);
     } else if (c.pen > -SLOP) {
       const vn = vx * c.nx + vy * c.ny;
-      if (vn < 0 && vn > -80) { vx -= c.nx * vn; vy -= c.ny * vn; }
+      if (vn < -5 && vn > -80) { vx -= c.nx * vn; vy -= c.ny * vn; }
       vx *= 0.999;
       contact = true; hitBeam = b; ht = c.t; hnx = c.nx; hny = c.ny;
       if (c.pen > bestPen) bestPen = c.pen;
@@ -412,6 +424,30 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
   return out || { x, y, vx, vy, contact, beam: hitBeam, t: ht, nx: hnx, ny: hny, pen: bestPen };
 }
 // 빔에 지속 하중(무게) 전달 — verlet 노드 힘 누적 (다음 스텝 적분에 반영)
+// 하중 분산 전달: 타이어 접촉 패치처럼 가장 가까운 빔 2개에 나눔.
+// 하중이 노드→노드로 뚝뚝 끊기며 다리를 두드리는 덜컹거림을 없앤다.
+function spreadLoad(x, y, F, roadOnly) {
+  const R = 44;
+  let found = [];
+  for (let i = 0; i < beams.length; i++) {
+    const b = beams[i];
+    if (b.broken) continue;
+    if (roadOnly && b.mat !== 'road') continue;
+    if (!roadOnly && MATERIALS[b.mat].noCollide) continue;
+    const abx = b.b.x - b.a.x, aby = b.b.y - b.a.y;
+    const L2 = abx * abx + aby * aby || 1;
+    let t = ((x - b.a.x) * abx + (y - b.a.y) * aby) / L2;
+    t = clamp(t, 0, 1);
+    const d = Math.hypot(x - (b.a.x + abx * t), y - (b.a.y + aby * t));
+    if (d > R) continue;
+    found.push({ b, t, w: R - d });
+  }
+  if (!found.length) return;
+  found.sort((p, q) => q.w - p.w);
+  found = found.slice(0, 3);
+  const tot = found.reduce((s, e) => s + e.w, 0) || 1;
+  for (const e of found) pushBeamForce(e.b, e.t, F * e.w / tot);
+}
 function pushBeamForce(beam, t, fy) {
   if (!beam || beam.broken) return;
   const wa = beam.a.fixed ? 0 : 1 - t, wb = beam.b.fixed ? 0 : t;
@@ -425,7 +461,7 @@ function physStep(dt) {
   // 1) 노드 적분 (Verlet)
   for (const n of nodes) {
     if (n.fixed) { n.px = n.x; n.py = n.y; continue; }
-    const vx = (n.x - n.px) * 0.996, vy = (n.y - n.py) * 0.996;
+    const vx = (n.x - n.px) * 0.99, vy = (n.y - n.py) * 0.99;
     n.px = n.x; n.py = n.y;
     n.x += vx + (n.fx / n.mass) * dt * dt;
     n.y += vy + (GRAV + n.fy / n.mass) * dt * dt;
@@ -455,8 +491,8 @@ function physStep(dt) {
       if (n.fixed) continue;
       collideNodeTerrain(n);
     }
-    // 차량/화물 충돌: 위치 보정은 매 패스, 하중(힘) 전달은 스텝당 1회 (중복 가중 방지)
-    if (it % 4 === 0) {
+    // 차량/화물 충돌: 위치 보정은 2회, 하중(힘) 전달은 스텝당 1회 (중복 가중·채터링 방지)
+    if (it === 0 || it === 15) {
       const couple = (it === 0);
       if (car) collideCar(couple);
       for (const b of bodies) collideBody(b, couple);
@@ -484,8 +520,8 @@ function physStep(dt) {
     if (n.fixed || n.anchor || n.y0 === undefined) continue;
     const rb = beams.filter(b => !b.broken && b.mat === 'road' && (b.a === n || b.b === n));
     if (!rb.length) continue;
-    const loaded = rb.some(b => Math.abs(b.strain) > 0.03);
-    if (loaded && (n.y - n.y0) > 28) {
+    const loaded = rb.some(b => Math.abs(b.strain) > 0.01);
+    if (loaded && (n.y - n.y0) > 20) {
       let victim = rb[0];
       for (const b of rb) if (Math.abs(b.strain) > Math.abs(victim.strain)) victim = b;
       breakBeam(victim);
@@ -537,8 +573,8 @@ function stepCar(dt) {
     const vn = rvx * nx + rvy * ny;
     let F = car.K * (dist - car.restLen) + car.D * vn;
     // 범프 스토퍼: 서스펜션 스트로크 물리 한계 (바퀴 늘어남/박힘 방지)
-    if (dist > car.restLen + 14) F += (dist - car.restLen - 14) * 3000;
-    if (dist < car.restLen - 10) F -= (car.restLen - 10 - dist) * 3000;
+    if (dist > car.restLen + 7) F += (dist - car.restLen - 7) * 3000;
+    if (dist < car.restLen - 5) F -= (car.restLen - 5 - dist) * 3000;
     const fx = nx * F, fy = ny * F;
     // 휠
     wh.vx -= fx / wh.m * dt; wh.vy -= fy / wh.m * dt;
@@ -546,12 +582,14 @@ function stepCar(dt) {
     car.vx += fx / car.m * dt; car.vy += fy / car.m * dt;
     car.va += (rx * fy - ry * fx) / car.I * dt;
   }
-  // 구동 모터: 접촉 중인 휠이 노면을 뒤로 밀고 차를 앞으로
+  // 구동 모터 (질량 비례 — 무거운 차도 동일 가속)
+  // 힐 어시스트: 기어오름·처짐 구간에서 저속이면 최대 2.5배 출력 (탈출용, 고속에선 정상)
+  const grip = 1 + clamp((60 - car.vx) / 60, 0, 1) * 1.5;
+  const drive = 650 * car.m * clamp(1 - car.vx / car.spec.top, 0, 1) * grip;
   for (const wh of car.wheels) {
-    if (wh.contact && Math.abs(car.vx) < car.spec.top) {
-      const F = car.spec.motor * (1 - car.vx / car.spec.top) * 0.5;
-      car.vx += F / car.m * dt;
-      wh.vx += F / wh.m * dt * 0.3;
+    if (wh.contact) {
+      car.vx += drive * 0.5 / car.m * dt;
+      wh.vx += drive * 0.5 / wh.m * dt * 0.15;
     }
   }
   // 감쇠 + 적분
@@ -583,16 +621,14 @@ function collideCar(couple) {
     if (tmp.contact) {
       anyContact = true;
       car.contactT = simTime;
-      // 모터 추가 견인
-      if (Math.abs(car.vx) < car.spec.top) car.vx += 100 * FIXED_DT;
       wh.spin += car.vx * 0.004;
       wh.vx *= 0.998; // 구름 저항
-      // 빔 위에 있으면 차량 무게를 다리에 전달 (지속 하중, 스텝당 1회)
-      if (couple && tmp.beam) pushBeamForce(tmp.beam, tmp.t, (wh.m + car.m * 0.25) * GRAV);
+      // 바퀴 하중을 노면에 분산 전달 (접촉 패치 — 스텝당 1회, 덜컹거림 방지)
+      if (couple) spreadLoad(wh.x, wh.y, (wh.m + car.m * 0.25) * GRAV, true);
     }
     void wasAir;
   }
-  // 섀시 4모서리 충돌 (박스 근사)
+  // 섀시 4모서리 충돌 (박스 근사) — 3px 이상 깊이 박힐 때만 반응 (스침 무시)
   const hw = car.w / 2, hh = car.h / 2;
   const corners = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]];
   let hits = 0;
@@ -600,7 +636,7 @@ function collideCar(couple) {
     const p = chassisPoint(lx, ly);
     collideCircleWorld(p.x, p.y, car.vx, car.vy, 7, car.m / 4, tmp, 'car');
     const dx = tmp.x - p.x, dy = tmp.y - p.y;
-    if (dx * dx + dy * dy > 0.01) {
+    if (dx * dx + dy * dy > 9) {
       car.x += dx * 0.7; car.y += dy * 0.7;
       const vn = car.vx * tmp.nx + car.vy * tmp.ny;
       if (vn < 0) { car.vx -= tmp.nx * vn * 1.2; car.vy -= tmp.ny * vn * 1.2; car.va *= 0.8; }
@@ -614,8 +650,12 @@ function collideCar(couple) {
       if (couple && tmp.beam) pushBeamForce(tmp.beam, tmp.t, car.m * 0.1 * GRAV);
     }
   }
-  if (hits >= 2) { car.vx *= 0.97; car.va *= 0.94; }
-  if (anyContact) { car.va *= 0.93; car.vx *= 0.999; } // 접지 시 자세 안정화
+  if (hits >= 2) { car.vx *= 0.985; car.va *= 0.94; }
+  // 접지 자세 안정화: 수평으로 복원하는 아케이드 보조 토크 (전복 방지)
+  if (anyContact) {
+    car.va += (0 - car.a) * 10 * FIXED_DT;
+    car.va *= 0.90; car.vx *= 0.999;
+  }
   if (car.va > 6) car.va = 6;
   if (car.va < -6) car.va = -6;
 }
@@ -637,9 +677,14 @@ function checkCarOutcome(dt) {
   // 전복
   if (Math.abs(car.a) > 2.2 && car.contactT > 0 && simTime - car.contactT < 1.2) flipTimer += dt; else flipTimer = 0;
   if (flipTimer > 1.4) return lose('🙃 전복!', '차량이 뒤집혔습니다. 노면이 평탄한지 확인하세요.');
-  // 정체
+  // 정체 (속도 기준)
   if (simTime > 4 && speed < 14 && car.x < goalX() - 20) stuckTimer += dt; else stuckTimer = 0;
   if (stuckTimer > 5) return lose('⏱ 정체!', '차량이 멈췄습니다. 다리가 휘었거나 끊어졌나요?');
+  // 갇힘 (위치 기준 — 진동하며 제자리인 경우도 감지)
+  if (simTime - stuckT > 3) {
+    if (Math.abs(car.x - stuckX) < 25) return lose('⏱ 정체!', '차량이 끼었습니다. 노면 단차나 처짐을 확인하세요.');
+    stuckX = car.x; stuckT = simTime;
+  }
   if (simTime > 60) return lose('⏱ 시간 초과!', '60초 안에 건너지 못했습니다.');
 }
 function win() {
@@ -679,7 +724,7 @@ function collideBody(b, couple) {
     b.x = tmp.x; b.y = tmp.y;
     // 반발 약간
     b.vx = tmp.vx * 0.98; b.vy = tmp.vy * (tmp.contact && tmp.vy > 0 ? -0.25 : 1);
-    if (tmp.contact && couple && tmp.beam) pushBeamForce(tmp.beam, tmp.t, b.m * GRAV);
+    if (tmp.contact && couple) spreadLoad(b.x, b.y, b.m * GRAV, false);
     if (tmp.contact && Math.abs(b.vy) > 150) { burst(b.x, b.y + b.r, '#cfd8e6', 6); }
   } else {
     // 상자: 4모서리를 강체 임펄스로
@@ -821,6 +866,14 @@ function drawTerrain(L) {
     ctx.fillStyle = '#2c2118';
     ctx.fillRect(L.island.x, L.island.top, L.island.w, H - L.island.top);
   }
+  // 절벽 모서리 모따기 콘크리트 (둥근 교대)
+  ctx.fillStyle = '#78909c';
+  ctx.beginPath();
+  ctx.moveTo(L.left, L.roadY); ctx.lineTo(L.left + 18, L.roadY); ctx.lineTo(L.left + 18, L.roadY + 5);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(L.right, L.roadY); ctx.lineTo(L.right - 18, L.roadY); ctx.lineTo(L.right - 18, L.roadY + 5);
+  ctx.closePath(); ctx.fill();
   // 잔디 윗면
   ctx.fillStyle = '#43a047';
   ctx.fillRect(0, L.roadY - 8, L.left + 2, 10);
@@ -830,10 +883,10 @@ function drawTerrain(L) {
   ctx.fillRect(0, L.roadY - 8, L.left + 2, 3);
   ctx.fillRect(L.right - 2, L.roadY - 8, W - L.right + 2, 3);
   if (L.island) ctx.fillRect(L.island.x, L.island.top - 8, L.island.w, 3);
-  // 출발/도착 도로 연장선
+  // 출발/도착 도로 연장선 (도로 윗면과 일치)
   ctx.fillStyle = '#333945';
-  ctx.fillRect(0, L.roadY - 14, L.left, 6);
-  ctx.fillRect(L.right, L.roadY - 14, W - L.right, 6);
+  ctx.fillRect(0, L.roadY - 6, L.left, 6);
+  ctx.fillRect(L.right, L.roadY - 6, W - L.right, 6);
 }
 function drawWater(L) {
   const t = timeSec;
@@ -1134,6 +1187,7 @@ function enterSim() {
   if (!roadExists) { toast('⚠️ 도로(Road) 상판이 없어요! 1번 자재로 길을 놓으세요'); sndFail(); return; }
   pushUndoSoft();
   buildSnap = serialize();
+  saveGame(true); // 설계안 자동 저장 (새로고침/이동 후에도 복원)
   mode = 'sim'; result = null; simTime = 0; dispatched = false;
   maxStrainSeen = 0; brokenCount = 0; bodies = []; car = null; particles = [];
   for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; n.y0 = n.y; }
@@ -1156,6 +1210,8 @@ function pushUndoSoft() { softPushed = true; }
 
 // ---------- 레벨 전환 ----------
 function setLevel(i, keepBridge) {
+  // 시뮬 중 레벨 이동 시 먼저 원복 → 잔해가 저장되는 것 방지
+  if (mode === 'sim') exitSim();
   // 이전 레벨 자동 저장
   try { if (nodes.length && beams.length) localStorage.setItem('pbw_level_' + levelIndex, serialize()); } catch (e) {}
   levelIndex = clamp(i, 0, LEVELS.length - 1);
@@ -1237,7 +1293,7 @@ window.addEventListener('pointerup', e => {
     const a = mouse.startNode, b = mouse.cur;
     if (Math.hypot(a.x - b.x, a.y - b.y) > 4) tryBuild(a, b);
   }
-  if (mouse.dragNode) { weldNodes(); refreshMasses(); updateHUD(); }
+  if (mouse.dragNode) { weldNodes(); refreshMasses(); updateHUD(); autosaveSoon(); }
   mouse.startNode = null; mouse.dragNode = null;
 });
 // 노드 이동 + 연결 빔 길이 제한 검증 (초과 시 원위치 — 공짜 늘이기 방지)
@@ -1272,7 +1328,14 @@ function tryBuild(a, b) {
   if (beamExists(na, nb, curMat)) { refreshMasses(); updateHUD(); return; }
   beams.push({ id: beamSeq++, a: na, b: nb, mat: curMat, rest: Math.hypot(na.x - nb.x, na.y - nb.y), broken: false, strain: 0 });
   weldNodes();
-  refreshMasses(); updateHUD(); sndClick();
+  refreshMasses(); updateHUD(); sndClick(); autosaveSoon();
+}
+// 편집 후 자동 저장 (3초 쓰로틀 — 새로고침해도 설계 유지)
+function autosaveSoon() {
+  const t = Date.now();
+  if (t - (autosaveSoon._l || 0) < 3000) return;
+  autosaveSoon._l = t;
+  try { if (mode === 'build' && nodes.length) localStorage.setItem(saveKey(), serialize()); } catch (e) {}
 }
 function eraseAt(wx, wy, soft) {
   let bd = 14, target = null;
@@ -1280,7 +1343,7 @@ function eraseAt(wx, wy, soft) {
   if (target) {
     if (!soft) pushUndo();
     beams = beams.filter(x => x !== target);
-    pruneNodes(); refreshMasses(); updateHUD();
+    pruneNodes(); refreshMasses(); updateHUD(); autosaveSoon();
     return;
   }
   const n = findNodeAt(wx, wy, 18);
@@ -1288,7 +1351,7 @@ function eraseAt(wx, wy, soft) {
     if (!soft) pushUndo();
     beams = beams.filter(x => x.a !== n && x.b !== n);
     nodes = nodes.filter(x => x !== n);
-    refreshMasses(); updateHUD();
+    refreshMasses(); updateHUD(); autosaveSoon();
   }
 }
 function pruneNodes() {
@@ -1371,7 +1434,7 @@ function bindUI() {
   $('btnClear').onclick = () => {
     if (mode !== 'build' || !confirm('앵커를 제외한 다리를 모두 지울까요?')) return;
     pushUndo();
-    beams = []; pruneNodes(); refreshMasses(); updateHUD();
+    beams = []; pruneNodes(); refreshMasses(); updateHUD(); autosaveSoon();
   };
   $('gridToggle').onchange = e => showGrid = e.target.checked;
   $('stressToggle').onchange = e => showStress = e.target.checked;
