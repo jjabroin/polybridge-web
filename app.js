@@ -10,7 +10,7 @@
 const W = 1280, H = 720;
 const GRAV = 1500;            // px/s^2
 const FIXED_DT = 1 / 60;
-const ITER = 14;              //constraint 반복
+const ITER = 18;              //constraint 반복 (트램펄린 억제)
 const GRID = 20;
 
 const canvas = document.getElementById('game');
@@ -254,13 +254,16 @@ function defaultBridge() {
     if (!amap.has(key)) amap.set(key, addNode(ax, ay, true, true));
   }
   // 도로 상판: left->right 균등 분할 (끝점 보장, 격자 40px 배수 간격)
+  // 원리: 도로 윗면(주행면)을 절벽면과 일치시킴 — 빔 충돌면(중심선-19px)과 지형면(15px)의
+  //  4px 진입턱을 없애기 위해 중간 노드는 +4px 내림. 끝점은 앵커(roadY) 공유로 하중을 절벽에 직접 전달.
   const segs = Math.max(1, Math.round((L.right - L.left) / 40));
   let prev = null;
   for (let i = 0; i <= segs; i++) {
     const xx = L.left + (L.right - L.left) * i / segs;
-    const key = xx + ',' + L.roadY;
-    let n = amap.get(key);
-    if (!n) n = addNode(xx, L.roadY, false, false);
+    const isEnd = (i === 0 || i === segs);
+    const yy = isEnd ? L.roadY : L.roadY + 4;
+    let n = isEnd ? amap.get(xx + ',' + L.roadY) : null;
+    if (!n) n = addNode(xx, yy, false, false);
     if (prev && !beamExists(prev, n)) beams.push({ id: beamSeq++, a: prev, b: n, mat: 'road', rest: Math.hypot(prev.x - n.x, prev.y - n.y), broken: false, strain: 0 });
     prev = n;
   }
@@ -295,7 +298,7 @@ function spawnCar() {
       x: sx + s * (spec.w / 2 - 18), y: sy + spec.h / 2 + 10,
       vx: 0, vy: 0, r: spec.wheelR, m: 2.2 * m, spin: 0, contact: false,
     })),
-    restLen: 14, K: 1400, D: 55, contactT: 0, airT: 0,
+    restLen: 14, K: 1400, D: 70, contactT: 0, airT: 0,
   };
   dispatched = true; stuckTimer = 0; flipTimer = 0; goalTimer = 0; loseTimer = 0;
   sndClick();
@@ -373,6 +376,8 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
     const th = M.thick / 2 + r * 0.9;
     const s = { x1: b.a.x, y1: b.a.y, x2: b.b.x, y2: b.b.y };
     const c = circleSeg(x, y, th, s);
+    // 차량은 빔 끝단 캡을 무시 (이음매 턱 발사 방지 — 직선 구간 내부하고만 충돌)
+    if (mode === 'car' && (c.t <= 0.002 || c.t >= 0.998)) continue;
     if (c.pen > 0) {
       const px = c.nx * c.pen, py = c.ny * c.pen;
       x += px; y += py;
@@ -406,7 +411,7 @@ function physStep(dt) {
   // 1) 노드 적분 (Verlet)
   for (const n of nodes) {
     if (n.fixed) { n.px = n.x; n.py = n.y; continue; }
-    const vx = (n.x - n.px) * 0.999, vy = (n.y - n.py) * 0.999;
+    const vx = (n.x - n.px) * 0.996, vy = (n.y - n.py) * 0.996;
     n.px = n.x; n.py = n.y;
     n.x += vx + (n.fx / n.mass) * dt * dt;
     n.y += vy + (GRAV + n.fy / n.mass) * dt * dt;
@@ -436,10 +441,11 @@ function physStep(dt) {
       if (n.fixed) continue;
       collideNodeTerrain(n);
     }
-    // 차량/화물 충돌 (반복 내 2회만)
-    if (it % 5 === 0) {
-      if (car) collideCar();
-      for (const b of bodies) collideBody(b);
+    // 차량/화물 충돌: 위치 보정은 매 패스, 하중(힘) 전달은 스텝당 1회 (중복 가중 방지)
+    if (it % 4 === 0) {
+      const couple = (it === 0);
+      if (car) collideCar(couple);
+      for (const b of bodies) collideBody(b, couple);
     }
   }
   // 5) 파단 판정 + 변형률 기록
@@ -504,7 +510,10 @@ function stepCar(dt) {
     const hpx = car.vx - car.va * ry, hpy = car.vy + car.va * rx;
     const rvx = wh.vx - hpx, rvy = wh.vy - hpy;
     const vn = rvx * nx + rvy * ny;
-    const F = car.K * (dist - car.restLen) + car.D * vn;
+    let F = car.K * (dist - car.restLen) + car.D * vn;
+    // 범프 스토퍼: 서스펜션 스트로크 물리 한계 (바퀴 늘어남/박힘 방지)
+    if (dist > car.restLen + 14) F += (dist - car.restLen - 14) * 3000;
+    if (dist < car.restLen - 10) F -= (car.restLen - 10 - dist) * 3000;
     const fx = nx * F, fy = ny * F;
     // 휠
     wh.vx -= fx / wh.m * dt; wh.vy -= fy / wh.m * dt;
@@ -538,7 +547,7 @@ function stepCar(dt) {
     const L = LV(); car.x = L.left - 130; car.y = L.roadY - 60; car.vx = car.vy = car.va = car.a = 0;
   }
 }
-function collideCar() {
+function collideCar(couple) {
   const tmp = {};
   let anyContact = false;
   for (const wh of car.wheels) {
@@ -553,8 +562,8 @@ function collideCar() {
       if (Math.abs(car.vx) < car.spec.top) car.vx += 100 * FIXED_DT;
       wh.spin += car.vx * 0.004;
       wh.vx *= 0.998; // 구름 저항
-      // 빔 위에 있으면 차량 무게를 다리에 전달 (지속 하중)
-      if (tmp.beam) pushBeamForce(tmp.beam, tmp.t, (wh.m + car.m * 0.25) * GRAV);
+      // 빔 위에 있으면 차량 무게를 다리에 전달 (지속 하중, 스텝당 1회)
+      if (couple && tmp.beam) pushBeamForce(tmp.beam, tmp.t, (wh.m + car.m * 0.25) * GRAV);
     }
     void wasAir;
   }
@@ -577,11 +586,13 @@ function collideCar() {
     } else if (tmp.contact) {
       anyContact = true;
       car.contactT = simTime;
-      if (tmp.beam) pushBeamForce(tmp.beam, tmp.t, car.m * 0.1 * GRAV);
+      if (couple && tmp.beam) pushBeamForce(tmp.beam, tmp.t, car.m * 0.1 * GRAV);
     }
   }
   if (hits >= 2) { car.vx *= 0.97; car.va *= 0.94; }
-  if (anyContact) { car.va *= 0.97; car.vx *= 0.999; } // 접지 시 자세 안정화
+  if (anyContact) { car.va *= 0.93; car.vx *= 0.999; } // 접지 시 자세 안정화
+  if (car.va > 6) car.va = 6;
+  if (car.va < -6) car.va = -6;
 }
 function checkCarOutcome(dt) {
   if (!dispatched || result) return;
@@ -636,14 +647,14 @@ function stepBody(b, dt) {
   b.vx *= 0.999; b.va *= 0.99;
   b.x += b.vx * dt; b.y += b.vy * dt; b.a += b.va * dt;
 }
-function collideBody(b) {
+function collideBody(b, couple) {
   const tmp = {};
   if (b.kind === 'ball') {
     collideCircleWorld(b.x, b.y, b.vx, b.vy, b.r, b.m, tmp, 'cargo');
     b.x = tmp.x; b.y = tmp.y;
     // 반발 약간
     b.vx = tmp.vx * 0.98; b.vy = tmp.vy * (tmp.contact && tmp.vy > 0 ? -0.25 : 1);
-    if (tmp.contact && tmp.beam) pushBeamForce(tmp.beam, tmp.t, b.m * GRAV);
+    if (tmp.contact && couple && tmp.beam) pushBeamForce(tmp.beam, tmp.t, b.m * GRAV);
     if (tmp.contact && Math.abs(b.vy) > 150) { burst(b.x, b.y + b.r, '#cfd8e6', 6); }
   } else {
     // 상자: 4모서리를 강체 임펄스로
@@ -666,7 +677,7 @@ function collideBody(b) {
           b.va += (rx * (j * tmp.ny) - ry * (j * tmp.nx)) / I;
           b.vx *= 0.97;
           if (tmp.beam) pushBeamNodes(tmp.beam, tmp.t, dx * 3, dy * 3, 0.3, 1.4);
-        } else if (tmp.contact && tmp.beam) {
+        } else if (tmp.contact && couple && tmp.beam) {
           pushBeamForce(tmp.beam, tmp.t, (b.m / 4) * GRAV);
         }
       }
@@ -814,9 +825,9 @@ function drawAnchors() {
   for (const n of nodes) {
     if (!n.anchor) continue;
     ctx.fillStyle = '#78909c';
-    ctx.fillRect(n.x - 9, n.y - 9, 18, 18);
+    ctx.fillRect(n.x - 7.5, n.y - 7.5, 15, 15);
     ctx.fillStyle = '#546e7a';
-    ctx.fillRect(n.x - 9, n.y + 3, 18, 6);
+    ctx.fillRect(n.x - 7.5, n.y + 2.5, 15, 5);
     ctx.fillStyle = '#263238';
     ctx.beginPath(); ctx.arc(n.x, n.y, 4, 0, 7); ctx.fill();
     ctx.fillStyle = '#eceff1';
@@ -964,12 +975,12 @@ function drawCar() {
   for (const wh of car.wheels) {
     ctx.save(); ctx.translate(wh.x, wh.y);
     ctx.fillStyle = '#14181f'; ctx.beginPath(); ctx.arc(0, 0, wh.r, 0, 7); ctx.fill();
-    ctx.strokeStyle = '#333e4d'; ctx.lineWidth = 3;
+    ctx.strokeStyle = '#232c38'; ctx.lineWidth = 2;
     for (let i = 0; i < 12; i++) {
       const a = wh.spin * 0.6 + i * Math.PI / 6;
       ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * wh.r * 0.80, Math.sin(a) * wh.r * 0.80);
-      ctx.lineTo(Math.cos(a) * wh.r * 0.99, Math.sin(a) * wh.r * 0.99);
+      ctx.moveTo(Math.cos(a) * wh.r * 0.86, Math.sin(a) * wh.r * 0.86);
+      ctx.lineTo(Math.cos(a) * wh.r * 0.985, Math.sin(a) * wh.r * 0.985);
       ctx.stroke();
     }
     ctx.fillStyle = '#90a4ae'; ctx.beginPath(); ctx.arc(0, 0, wh.r * 0.55, 0, 7); ctx.fill();
@@ -1370,9 +1381,22 @@ function frame(now) {
   if ((frame._c = (frame._c || 0) + 1) % 20 === 0) $('fps').textContent = Math.round(fpsE) + 'fps';
 }
 
+// 디버그/스크린샷용 데모: ?demo=1 이면 샘플 트러스를 짓고 자동 주행
+function demoBridge() {
+  const L = LV();
+  const deck = nodes.filter(n => !n.anchor && (n.y - L.roadY) >= -1 && (n.y - L.roadY) <= 6 && n.x >= L.left - 1 && n.x <= L.right + 1).sort((a, b) => a.x - b.x);
+  if (!deck.length) return;
+  const lows = deck.map(d => addNode(d.x, L.roadY + 75, false, false));
+  const mk = (a, b, mat) => beams.push({ id: beamSeq++, a, b, mat, rest: Math.hypot(a.x - b.x, a.y - b.y), broken: false, strain: 0 });
+  deck.forEach((d, i) => {
+    mk(d, lows[i], 'wood');
+    if (i < deck.length - 1) { mk(lows[i], lows[i + 1], 'wood'); mk(deck[i], lows[i + 1], 'wood'); }
+  });
+  refreshMasses(); updateHUD();
+}
+
 // ---------- 부팅 ----------
-function boot() {
-  // roundRect 폴리필 (구형 브라우저/GitHub Pages 안정성)
+function boot() {  // roundRect 폴리필 (구형 브라우저/GitHub Pages 안정성)
   if (!CanvasRenderingContext2D.prototype.roundRect) {
     CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
       r = Math.min(typeof r === 'number' ? r : 4, w / 2, h / 2);
@@ -1389,7 +1413,18 @@ function boot() {
   let idx = 0;
   try { idx = +(localStorage.getItem('pbw_level_idx') || 0); } catch (e) {}
   setLevel(clamp(idx, 0, LEVELS.length - 1));
-  try { if (!localStorage.getItem('pbw_seen')) $('help').classList.remove('hidden'); } catch (e) {}
+  try {
+    const params = new URLSearchParams(location.search);
+    if (params.get('nohelp') === '1' || params.get('demo') === '1') $('help').classList.add('hidden');
+    else if (!localStorage.getItem('pbw_seen')) $('help').classList.remove('hidden');
+  } catch (e) {}
+  try {
+    if (new URLSearchParams(location.search).get('demo') === '1') {
+      $('help').classList.add('hidden');
+      setTimeout(() => { demoBridge(); enterSim(); }, 400);
+      setTimeout(() => { if (mode === 'sim' && !car) spawnCar(); }, 900);
+    }
+  } catch (e) {}
   requestAnimationFrame(t => { last = t; requestAnimationFrame(frame); });
 }
 boot();
