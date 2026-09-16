@@ -25,7 +25,7 @@ let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
 //  구조 매핑: 거더교=road+하부보강 / 트러스교(Warren·Pratt)=wood·steel 삼각형 /
 //            아치교=steel 압축아치 / 현수교=cable+타워 / 사장교=타워+방사형cable
 const MATERIALS = {
-  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.12, breakC: -0.10, stiff: 1.0,  wpp: 0.030, maxLen: 120, minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
+  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.20, breakC: -0.13, stiff: 1.0,  wpp: 0.030, maxLen: 120, minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
   wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.7,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false },
   steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false },
   cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true },
@@ -83,6 +83,7 @@ let buildSnap = null;
 let simTime = 0, dispatched = false, result = null;
 let maxStrainSeen = 0, brokenCount = 0;
 let shake = 0, timeSec = 0, cloudT = 0;
+let breakFlash = 0;
 let loadMass = 40;
 let showGrid = true, showStress = true;
 let undoStack = [], redoStack = [];
@@ -142,7 +143,7 @@ function goalX() { return LV().right + 60; }
 
 // ---------- 노드/빔 ----------
 function addNode(x, y, fixed, anchor) {
-  const n = { id: nodeSeq++, x, y, px: x, py: y, fx: 0, fy: 0, mass: 1.2, fixed: !!fixed, anchor: !!anchor };
+  const n = { id: nodeSeq++, x, y, px: x, py: y, fx: 0, fy: 0, mass: 1.2, fixed: !!fixed, anchor: !!anchor, y0: y };
   nodes.push(n); return n;
 }
 function nodeMass(n) {
@@ -473,13 +474,23 @@ function physStep(dt) {
     const a = Math.abs(strain);
     if (a > mx) mx = a;
     if (strain > M.breakT * bonus || strain < M.breakC * bonus) {
-      b.broken = true; b.strain = 0; brokenCount++;
-      burst((b.a.x + b.b.x) / 2, (b.a.y + b.b.y) / 2, MATERIALS[b.mat].color, 14);
-      shake = Math.min(14, shake + 5);
-      sndBreak();
+      breakBeam(b);
     }
   }
   if (mx > maxStrainSeen) maxStrainSeen = mx;
+  // 도로 처짐 파단 (보 공학 원칙): 받침 없는 데크는 해먹처럼 주저앉으며 파괴.
+  // 국소 꺾임이 아니라 '건설 위치 대비 처짐'으로 판단 — 정상 트러스의 탄성 처짐과 맨도로 붕괴를 구분.
+  for (const n of nodes) {
+    if (n.fixed || n.anchor || n.y0 === undefined) continue;
+    const rb = beams.filter(b => !b.broken && b.mat === 'road' && (b.a === n || b.b === n));
+    if (!rb.length) continue;
+    const loaded = rb.some(b => Math.abs(b.strain) > 0.03);
+    if (loaded && (n.y - n.y0) > 28) {
+      let victim = rb[0];
+      for (const b of rb) if (Math.abs(b.strain) > Math.abs(victim.strain)) victim = b;
+      breakBeam(victim);
+    }
+  }
   if (car) checkCarOutcome(dt);
   // 물 입자/파티클
   updateParticles(dt);
@@ -707,6 +718,15 @@ function collideBody(b, couple) {
 }
 
 // ---------- 파티클 ----------
+// 부재 파단 (공통 처리 — 파티클·화면 피드백 포함)
+function breakBeam(b) {
+  if (b.broken) return;
+  b.broken = true; b.strain = 0; brokenCount++;
+  burst((b.a.x + b.b.x) / 2, (b.a.y + b.b.y) / 2, MATERIALS[b.mat].color, b.mat === 'road' ? 22 : 14);
+  shake = Math.min(14, shake + 5);
+  breakFlash = 0.45;
+  sndBreak();
+}
 function burst(x, y, color, n) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 220;
@@ -756,6 +776,13 @@ function render() {
   drawParticles(); drawPreview();
   ctx.restore();
   shake *= 0.88; if (shake < 0.2) shake = 0;
+  // 파단 플래시 (빨간 테두리)
+  if (breakFlash > 0.02) {
+    ctx.strokeStyle = `rgba(244,67,54,${(breakFlash * 0.55).toFixed(3)})`;
+    ctx.lineWidth = 26;
+    ctx.strokeRect(0, 0, cw, ch);
+    breakFlash *= 0.90;
+  } else breakFlash = 0;
   flagWave += 0.08;
 }
 function drawSky() {
@@ -1109,7 +1136,7 @@ function enterSim() {
   buildSnap = serialize();
   mode = 'sim'; result = null; simTime = 0; dispatched = false;
   maxStrainSeen = 0; brokenCount = 0; bodies = []; car = null; particles = [];
-  for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; }
+  for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; n.y0 = n.y; }
   for (const b of beams) { b.broken = false; b.strain = 0; }
   refreshMasses();
   hideOverlay(); sndClick();
