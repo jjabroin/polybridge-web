@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Poly Bridge Web — 커스텀 다리 빌더</title>
+<meta name="description" content="브라우저에서 즐기는 폴리브릿지 스타일 다리 건설 시뮬레이션. 직접 다리를 설계하고 강체 자동차로 테스트하세요.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <!-- 상단 HUD -->
+  <header id="topbar">
+    <div class="brand">🌉 <b>Poly Bridge</b> <span>WEB</span></div>
+    <div class="level-box">
+      <button id="prevLevel" title="이전 레벨">◀</button>
+      <select id="levelSelect"></select>
+      <button id="nextLevel" title="다음 레벨">▶</button>
+    </div>
+    <div class="budget-box">
+      <div class="budget-top"><span>💰 예산</span><span id="budgetText">$0 / $0</span></div>
+      <div class="budget-bar"><div id="budgetFill"></div></div>
+    </div>
+    <div class="sim-box">
+      <button id="btnBuild" class="tab active" title="건설 모드 (B)">🔨 건설</button>
+      <button id="btnSim" class="tab go" title="시뮬레이션 (Space)">▶ 주행 테스트</button>
+      <button id="btnStop" class="tab hidden" title="건설로 복귀 (Space)">⏹ 정지</button>
+    </div>
+  </header>
+
+  <!-- 좌측: 자재 팔레트 -->
+  <aside id="palette">
+    <h3>자재 <small id="matHint">1~4</small></h3>
+    <div id="materials"></div>
+    <h3>도구 <small>B·E·M</small></h3>
+    <div class="tools">
+      <button data-tool="build" class="tool active" title="다리 놓기 (B)">✏️ 놓기</button>
+      <button data-tool="move" class="tool" title="노드 이동 (M)">✋ 이동</button>
+      <button data-tool="erase" class="tool" title="지우기 (E)">🧽 지우기</button>
+    </div>
+    <label class="row"><input type="checkbox" id="gridToggle" checked> 격자 스냅</label>
+    <label class="row"><input type="checkbox" id="stressToggle" checked> 응력 표시</label>
+    <div class="row btns">
+      <button id="btnUndo" title="Ctrl+Z">↩</button>
+      <button id="btnRedo" title="Ctrl+Y">↪</button>
+      <button id="btnClear" title="다리 전체 삭제">🗑</button>
+    </div>
+  </aside>
+
+  <!-- 우측: 차량 & 테스트 -->
+  <aside id="testpanel">
+    <h3>테스트</h3>
+    <div id="cars"></div>
+    <button id="btnDrive" class="wide primary" title="자동차 출발 (D)">🚗 자동차 출발</button>
+    <div class="grid2">
+      <button id="btnBall" title="무거운 강체 공 낙하">⚽ 공 낙하</button>
+      <button id="btnCrate" title="강체 상자 낙하">📦 상자</button>
+    </div>
+    <div class="slider-row">
+      <label>차량 무게</label>
+      <input type="range" id="carMass" min="0.6" max="2.2" step="0.1" value="1">
+      <span id="carMassVal">1.0×</span>
+    </div>
+    <div class="slider-row">
+      <label>적재 하중</label>
+      <input type="range" id="loadMass" min="10" max="120" step="5" value="40">
+      <span id="loadMassVal">40kg</span>
+    </div>
+    <h3>저장</h3>
+    <div class="grid2">
+      <button id="btnSave">💾 저장</button>
+      <button id="btnLoad">📂 불러오기</button>
+    </div>
+    <div class="grid2">
+      <button id="btnExport">📤 내보내기</button>
+      <button id="btnImport">📥 가져오기</button>
+    </div>
+    <button id="btnHelp" class="wide">❓ 도움말</button>
+  </aside>
+
+  <!-- 하단 상태바 -->
+  <footer id="statusbar">
+    <span id="hint">드래그로 다리를 놓으세요 · 우클릭=지우기 · Space=주행</span>
+    <span id="stressLegend"><i class="t"></i>인장 <i class="c"></i>압축 <b id="maxStrain">0%</b></span>
+    <span id="fps"></span>
+  </footer>
+
+  <!-- 중앙 오버레이 -->
+  <div id="overlay" class="hidden">
+    <div id="overlayCard">
+      <h1 id="ovTitle">성공!</h1>
+      <p id="ovDesc"></p>
+      <div id="ovStats"></div>
+      <div class="ov-btns">
+        <button id="ovNext" class="primary">다음 레벨 ▶</button>
+        <button id="ovRetry">다시 시도</button>
+        <button id="ovBuild">🔨 계속 건설</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 도움말 모달 -->
+  <div id="help" class="hidden">
+    <div class="help-card">
+      <h2>🌉 플레이 방법</h2>
+      <ol>
+        <li><b>자재 선택</b> — 도로(필수 주행면) · 목재(싸고 약함) · 철강(비싸고 강함) · 케이블(인장 전용)을 고르세요. <kbd>1</kbd>~<kbd>4</kbd></li>
+        <li><b>다리 놓기</b> — 초록 앵커나 기존 노드에서 드래그해 빔을 연결하세요. 격자에 스냅됩니다.</li>
+        <li><b>예산 준수</b> — 상단 예산 바가 빨개지면 주행 테스트가 불가합니다.</li>
+        <li><b>주행 테스트</b> — <kbd>Space</kbd> 후 <b>🚗 자동차 출발</b> (<kbd>D</kbd>). 강체 차량이 다리를 건너 깃발에 닿으면 성공!</li>
+        <li><b>강체 하중</b> — ⚽공·📦상자를 떨어뜨려 내구력을 시험하세요. 빨강=인장, 파랑=압축 과부하 시 파괴됩니다.</li>
+        <li><b>도구</b> — <kbd>B</kbd> 놓기 · <kbd>M</kbd> 이동 · <kbd>E</kbd>/우클릭 지우기 · <kbd>Ctrl+Z</kbd> 되돌리기</li>
+      </ol>
+      <p class="tip">💡 삼각 트러스가 사각보다 훨씬 강합니다. 도로는 촘촘히(≤80px), 케이블은 위에서吊る듯 당기는 용도로!</p>
+      <button id="helpClose" class="primary">닫기</button>
+    </div>
+  </div>
+
+  <input type="file" id="fileInput" accept=".json,application/json" class="hidden">
+</div>
+<script src="app.js"></script>
+</body>
+</html>
