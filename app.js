@@ -18,15 +18,25 @@ const ctx = canvas.getContext('2d');
 let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
 
 // ---------- 자재 ----------
+// 원리 (Poly Bridge 공식 스펙에서 도출한 상대 비율 — wood=1 기준):
+//  비용: road 1.1 / wood 1 / steel 2.5 / cable 2 | 강도: road 1.125 / wood 1 / steel 2.5 / cable 2.75(인장전용)
+//  무게: steel > road > wood > cable | 길이: road=wood(짧음) < steel(김) < cable(무제한급)
+//  충돌: 차량은 ROAD하고만 충돌 (원작 원칙). cable은 어떤 강체와도 충돌하지 않는 순수 인장재.
+//  구조 매핑: 거더교=road+하부보강 / 트러스교(Warren·Pratt)=wood·steel 삼각형 /
+//            아치교=steel 압축아치 / 현수교=cable+타워 / 사장교=타워+방사형cable
 const MATERIALS = {
-  road:  { name: '도로', en: 'ROAD',   cost: 6.0, breakT: 0.22, breakC: -0.15, stiff: 0.9,  wpp: 0.030, maxLen: 85,  minLen: 15, thick: 11, color: '#3a3f4a', key: '1' },
-  wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.7,  wpp: 0.016, maxLen: 130, minLen: 15, thick: 7,  color: '#b07a45', key: '2' },
-  steel: { name: '철강', en: 'STEEL',  cost: 9.0, breakT: 0.35, breakC: -0.25, stiff: 1.0,  wpp: 0.045, maxLen: 170, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3' },
-  cable: { name: '케이블', en: 'CABLE', cost: 2.0, breakT: 0.45, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 260, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4' },
+  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.22, breakC: -0.15, stiff: 0.9,  wpp: 0.030, maxLen: 80,  minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
+  wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.7,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false },
+  steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false },
+  cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true },
 };
 const MAT_ORDER = ['road', 'wood', 'steel', 'cable'];
 
 // ---------- 차량 ----------
+// 설계 원천: Matter.js 공식 car 예제(MIT)의 검증된 치수 원리를 우리 서스펜션 방식에 이식.
+//  - 휠베이스: 섀시 끝에서 안쪽으로 18px (w/2-18) — 바깥 배치로 전복 안정성 확보
+//  - 바퀴: 고마찰 타이어, 섀시-바퀴 충돌 그룹 분리(서스펜션으로만 연결)
+//  - 액슬: Matter는 강체(stiffness 1)지만 우리 지형(다리 이음매) 대응을 위해 짧고 단단한 서스펜션으로 대체
 const CARS = {
   light: { name: '🚗 경차', w: 76, h: 20, wheelR: 15, mass: 10, motor: 800, top: 185, color: '#ff5252' },
   suv:   { name: '🚙 SUV',  w: 90, h: 24, wheelR: 17, mass: 15, motor: 1000, top: 170, color: '#26a69a' },
@@ -45,7 +55,7 @@ const LEVELS = [
     desc: '경간 600px! 목재만으론 버겁습니다. 철강을 섞어보세요.',
     anchors: [[280,380],[880,380],[280,472],[880,472],[190,472],[970,472],[280,288],[880,288]],
     car: 'suv' },
-  { name: '3 · 깊은 협곡', roadY: 330, left: 360, right: 840, waterY: 645, budget: 21000,
+  { name: '3 · 깊은 협곡', roadY: 330, left: 360, right: 840, waterY: 645, budget: 24000,
     desc: '아래로 길게! 현수(케이블) 구조가 유리합니다.',
     anchors: [[360,330],[840,330],[360,430],[840,430],[360,530],[840,530],[270,430],[930,430]],
     car: 'suv' },
@@ -53,7 +63,7 @@ const LEVELS = [
     desc: '가운데 섬을 밟고 가세요. 섬 앵커를 적극 활용!',
     anchors: [[260,390],[940,390],[260,482],[940,482],[530,486],[670,486],[260,298],[940,298]],
     island: { x: 530, w: 140, top: 486 }, car: 'light' },
-  { name: '5 · 높은 고가', roadY: 300, left: 240, right: 960, waterY: 620, budget: 33000,
+  { name: '5 · 높은 고가', roadY: 300, left: 240, right: 960, waterY: 620, budget: 38000,
     desc: '경간 720px 최종 관문. 케이블 스테이 + 철강 트러스의 조합!',
     anchors: [[240,300],[960,300],[240,392],[960,392],[150,392],[1050,392],[240,190],[960,190],[150,190],[1050,190]],
     car: 'truck' },
@@ -78,6 +88,7 @@ let showGrid = true, showStress = true;
 let undoStack = [], redoStack = [];
 let mouse = { sx: 0, sy: 0, wx: 0, wy: 0, down: false, rdown: false, startNode: null, cur: null, hoverBeam: null, dragNode: null, moved: false };
 let loseTimer = 0, stuckTimer = 0, flipTimer = 0, goalTimer = 0;
+let simOverBudget = false;
 let flagWave = 0;
 
 const $ = id => document.getElementById(id);
@@ -152,10 +163,63 @@ function findNodeAt(wx, wy, tol) {
   return best;
 }
 function snapPoint(wx, wy) {
-  const hit = findNodeAt(wx, wy, 20);
+  // 기존 노드 우선 스냅 (반경 30 — 도로/트러스 확실히 연결)
+  const hit = findNodeAt(wx, wy, 30);
   if (hit) return { x: hit.x, y: hit.y, node: hit };
   if (showGrid) return { x: Math.round(wx / GRID) * GRID, y: Math.round(wy / GRID) * GRID, node: null };
   return { x: wx, y: wy, node: null };
+}
+// 새 노드가 기존 빔 위에 떨어지면 빔을 자동 분할 (Poly Bridge식 — 구조 일체화)
+function splitBeamAt(nd) {
+  let best = null, bd = 8;
+  for (const b of beams) {
+    if (b.a === nd || b.b === nd) continue;
+    const c = circleSeg(nd.x, nd.y, 0, { x1: b.a.x, y1: b.a.y, x2: b.b.x, y2: b.b.y });
+    const d = Math.hypot(nd.x - c.qx, nd.y - c.qy);
+    if (c.t < 0.05 || c.t > 0.95) continue; // 끝점 근처는 분할 대신 스냅으로 처리
+    const l1 = Math.hypot(nd.x - b.a.x, nd.y - b.a.y);
+    const l2 = Math.hypot(nd.x - b.b.x, nd.y - b.b.y);
+    const M = MATERIALS[b.mat];
+    if (d < bd && l1 >= M.minLen && l2 >= M.minLen) { bd = d; best = b; }
+  }
+  if (!best) return false;
+  beams = beams.filter(x => x !== best);
+  for (const [p, q] of [[best.a, nd], [nd, best.b]]) {
+    beams.push({ id: beamSeq++, a: p, b: q, mat: best.mat, rest: Math.hypot(p.x - q.x, p.y - q.y), broken: false, strain: 0 });
+  }
+  return true;
+}
+// 근거리에 겹친 자유 노드를 자동 용접 (도로/목재 분리 방지)
+function weldNodes(tol) {
+  tol = tol || 10;
+  for (let i = 0; i < nodes.length; i++) {
+    const a = nodes[i];
+    if (a.fixed || a.anchor) continue;
+    for (let j = i + 1; j < nodes.length; j++) {
+      const b = nodes[j];
+      if (b.fixed || b.anchor) continue;
+      if (Math.hypot(a.x - b.x, a.y - b.y) > tol) continue;
+      // 병합 시 극단적 단부재가 생기면 건너뜀
+      let ok = true;
+      for (const bm of beams) {
+        const p = bm.a === b ? a : bm.a, q = bm.b === b ? a : bm.b;
+        if (p !== q && Math.hypot(p.x - q.x, p.y - q.y) < 6) { ok = false; break; }
+      }
+      if (!ok) continue;
+      for (const bm of beams) {
+        if (bm.a === b) bm.a = a;
+        if (bm.b === b) bm.b = a;
+        bm.rest = Math.hypot(bm.a.x - bm.b.x, bm.a.y - bm.b.y);
+      }
+      beams = beams.filter(x => x.a !== x.b);
+      const seen = new Set();
+      beams = beams.filter(x => {
+        const k = Math.min(x.a.id, x.b.id) + '|' + Math.max(x.a.id, x.b.id) + '|' + x.mat;
+        if (seen.has(k)) return false; seen.add(k); return true;
+      });
+      nodes.splice(j, 1); j--;
+    }
+  }
 }
 function beamExists(a, b) { return beams.some(x => (x.a === a && x.b === b) || (x.a === b && x.b === a)); }
 function pushUndo() {
@@ -189,8 +253,8 @@ function defaultBridge() {
     const key = ax + ',' + ay;
     if (!amap.has(key)) amap.set(key, addNode(ax, ay, true, true));
   }
-  // 도로 상판: left->right 균등 분할 (끝점 보장)
-  const segs = Math.max(1, Math.ceil((L.right - L.left) / 60));
+  // 도로 상판: left->right 균등 분할 (끝점 보장, 격자 40px 배수 간격)
+  const segs = Math.max(1, Math.round((L.right - L.left) / 40));
   let prev = null;
   for (let i = 0; i <= segs; i++) {
     const xx = L.left + (L.right - L.left) * i / segs;
@@ -227,11 +291,11 @@ function spawnCar() {
     m: spec.mass * m, w: spec.w, h: spec.h,
     I: spec.mass * m * (spec.w * spec.w + spec.h * spec.h) / 12,
     wheels: [-1, 1].map(s => ({
-      ox: s * spec.w * 0.32, oy: spec.h * 0.5 + 12,
-      x: sx + s * spec.w * 0.32, y: sy + spec.h * 0.5 + 12,
+      ox: s * (spec.w / 2 - 18), oy: spec.h / 2 + 10,
+      x: sx + s * (spec.w / 2 - 18), y: sy + spec.h / 2 + 10,
       vx: 0, vy: 0, r: spec.wheelR, m: 2.2 * m, spin: 0, contact: false,
     })),
-    restLen: 20, K: 950, D: 42, contactT: 0, airT: 0,
+    restLen: 14, K: 1400, D: 55, contactT: 0, airT: 0,
   };
   dispatched = true; stuckTimer = 0; flipTimer = 0; goalTimer = 0; loseTimer = 0;
   sndClick();
@@ -276,8 +340,10 @@ function pushBeamNodes(beam, t, ix, iy, posK, velK) {
   if (!A.fixed) A.y += iy * wa * posK / tot * 2;
   if (!B.fixed) B.y += iy * wb * posK / tot * 2;
 }
-function collideCircleWorld(x, y, vx, vy, r, mass, out) {
+function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
   // 지형 + 빔과 충돌. out: {x,y,vx,vy,contact,beam,t,nx,ny,pen}
+  // mode: 'car' = 도로(ROAD)하고만 충돌 (Poly Bridge 원작 원칙 — 트러스/케이블은 통과)
+  //       'cargo' = 케이블 제외 전부 충돌 (하중 시험용 공/상자)
   // SLOP: 정지 접촉을 유지해 떨림 없이 하중을 전달 (Z값 경계 호버 방지)
   const SLOP = 2.2;
   let contact = false, hitBeam = null, ht = 0, hnx = 0, hny = -1, bestPen = -1e9;
@@ -301,7 +367,10 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out) {
   }
   for (const b of beams) {
     if (b.broken) continue;
-    const th = MATERIALS[b.mat].thick / 2 + r * 0.9;
+    const M = MATERIALS[b.mat];
+    if (mode === 'car' && !M.collideCar) continue;  // 차량은 도로만 밟는다
+    if (mode !== 'car' && M.noCollide) continue;    // 케이블은 만질 수 없는 이상적 인장재
+    const th = M.thick / 2 + r * 0.9;
     const s = { x1: b.a.x, y1: b.a.y, x2: b.b.x, y2: b.b.y };
     const c = circleSeg(x, y, th, s);
     if (c.pen > 0) {
@@ -473,7 +542,7 @@ function collideCar() {
   const tmp = {};
   let anyContact = false;
   for (const wh of car.wheels) {
-    collideCircleWorld(wh.x, wh.y, wh.vx, wh.vy, wh.r, wh.m, tmp);
+    collideCircleWorld(wh.x, wh.y, wh.vx, wh.vy, wh.r, wh.m, tmp, 'car');
     const wasAir = !wh.contact;
     wh.x = tmp.x; wh.y = tmp.y; wh.vx = tmp.vx; wh.vy = tmp.vy;
     wh.contact = tmp.contact;
@@ -495,7 +564,7 @@ function collideCar() {
   let hits = 0;
   for (const [lx, ly] of corners) {
     const p = chassisPoint(lx, ly);
-    collideCircleWorld(p.x, p.y, car.vx, car.vy, 7, car.m / 4, tmp);
+    collideCircleWorld(p.x, p.y, car.vx, car.vy, 7, car.m / 4, tmp, 'car');
     const dx = tmp.x - p.x, dy = tmp.y - p.y;
     if (dx * dx + dy * dy > 0.01) {
       car.x += dx * 0.7; car.y += dy * 0.7;
@@ -540,7 +609,8 @@ function checkCarOutcome(dt) {
 function win() {
   result = 'win';
   const usage = totalCost() / LV().budget;
-  const stars = (brokenCount === 0 ? 1 : 0) + (usage < 0.8 ? 1 : 0) + (simTime < 25 ? 1 : 0);
+  let stars = (brokenCount === 0 ? 1 : 0) + (usage < 0.8 ? 1 : 0) + (simTime < 25 ? 1 : 0);
+  if (simOverBudget) stars = Math.min(stars, 2);
   sndWin();
   confetti();
   showOverlay(true, '🎉 레벨 클리어!', LV().desc, [
@@ -569,7 +639,7 @@ function stepBody(b, dt) {
 function collideBody(b) {
   const tmp = {};
   if (b.kind === 'ball') {
-    collideCircleWorld(b.x, b.y, b.vx, b.vy, b.r, b.m, tmp);
+    collideCircleWorld(b.x, b.y, b.vx, b.vy, b.r, b.m, tmp, 'cargo');
     b.x = tmp.x; b.y = tmp.y;
     // 반발 약간
     b.vx = tmp.vx * 0.98; b.vy = tmp.vy * (tmp.contact && tmp.vy > 0 ? -0.25 : 1);
@@ -585,7 +655,7 @@ function collideBody(b) {
       // 코너 속도
       const rx = px - b.x, ry = py - b.y;
       const pvx = b.vx - b.va * ry, pvy = b.vy + b.va * rx;
-      collideCircleWorld(px, py, pvx, pvy, 3, b.m / 4, tmp);
+      collideCircleWorld(px, py, pvx, pvy, 3, b.m / 4, tmp, 'cargo');
       const dx = tmp.x - px, dy = tmp.y - py;
       if (dx * dx + dy * dy > 0.01) {
         b.x += dx * 0.6; b.y += dy * 0.6;
@@ -841,39 +911,74 @@ function drawBodies() {
 }
 function drawCar() {
   if (!car) return;
-  // 서스펜션 암
+  // 서스펜션 암 → 코일 스프링 (Matter식 리지드 액슬 대신 스트로크가 보이는 코일)
   const c = Math.cos(car.a), s = Math.sin(car.a);
-  ctx.strokeStyle = '#222'; ctx.lineWidth = 5;
   for (const wh of car.wheels) {
     const hx = car.x + wh.ox * c - wh.oy * s, hy = car.y + wh.ox * s + wh.oy * c;
+    const dx = wh.x - hx, dy = wh.y - hy, d = Math.hypot(dx, dy) || 1;
+    const nx = -dy / d, ny = dx / d, coils = 5, amp = 5;
+    ctx.strokeStyle = '#1c2333'; ctx.lineWidth = 6;
     ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(wh.x, wh.y); ctx.stroke();
+    ctx.strokeStyle = '#9aa7bd'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    for (let i = 0; i <= coils * 2; i++) {
+      const t = i / (coils * 2);
+      const off = (i % 2 === 0) ? 0 : amp;
+      const px = hx + dx * t + nx * off, py = hy + dy * t + ny * off;
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.stroke();
   }
-  // 차체
+  // 차체 — Matter식 chamfer(둥근 앞뒤) + 캐빈 + 등화류
   ctx.save(); ctx.translate(car.x, car.y); ctx.rotate(car.a);
   const w = car.w, h = car.h;
   const g = ctx.createLinearGradient(0, -h, 0, h);
   g.addColorStop(0, car.spec.color); g.addColorStop(1, 'rgba(0,0,0,.45)');
   ctx.fillStyle = g;
   ctx.beginPath();
-  ctx.roundRect(-w / 2, -h / 2 - 10, w, h + 10, 8); ctx.fill();
-  ctx.fillStyle = 'rgba(200,235,255,.9)';
-  ctx.beginPath(); ctx.roundRect(-w * 0.28, -h / 2 - 8, w * 0.5, 12, 4); ctx.fill();
-  ctx.fillStyle = '#ffeb3b';
-  ctx.fillRect(w / 2 - 2, -4, 5, 6);
+  ctx.roundRect(-w / 2, -h / 2 - 6, w, h + 6, 9); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 2; ctx.stroke();
+  // 캐빈 (사다리꼴 유리)
+  ctx.fillStyle = 'rgba(200,235,255,.92)';
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.30, -h / 2 - 6);
+  ctx.lineTo(-w * 0.18, -h / 2 - 19);
+  ctx.lineTo(w * 0.22, -h / 2 - 19);
+  ctx.lineTo(w * 0.34, -h / 2 - 6);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1.5; ctx.stroke();
+  // 도어 라인 + 손잡이
+  ctx.strokeStyle = 'rgba(0,0,0,.3)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-w * 0.02, -h / 2 - 4); ctx.lineTo(-w * 0.02, h / 2); ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(w * 0.03, -h / 2 + 2, 8, 2.5);
+  // 범퍼
   ctx.fillStyle = 'rgba(0,0,0,.35)';
-  ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText(car.spec.name.split(' ')[1] || '', 0, 6);
+  ctx.fillRect(-w / 2 - 1, h / 2 - 5, 6, 5);
+  ctx.fillRect(w / 2 - 5, h / 2 - 5, 6, 5);
+  // 헤드라이트(앞) + 테일라이트(뒤)
+  ctx.fillStyle = '#ffeb3b'; ctx.fillRect(w / 2 - 3, -6, 5, 7);
+  ctx.fillStyle = 'rgba(255,235,59,.25)'; ctx.fillRect(w / 2 + 2, -9, 16, 13);
+  ctx.fillStyle = '#e53935'; ctx.fillRect(-w / 2 - 2, -6, 5, 7);
   ctx.restore();
-  // 바퀴
+  // 바퀴 — 트레드 타이어 + 림 + 스포크
   for (const wh of car.wheels) {
     ctx.save(); ctx.translate(wh.x, wh.y);
     ctx.fillStyle = '#14181f'; ctx.beginPath(); ctx.arc(0, 0, wh.r, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#333e4d'; ctx.lineWidth = 3;
+    for (let i = 0; i < 12; i++) {
+      const a = wh.spin * 0.6 + i * Math.PI / 6;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * wh.r * 0.80, Math.sin(a) * wh.r * 0.80);
+      ctx.lineTo(Math.cos(a) * wh.r * 0.99, Math.sin(a) * wh.r * 0.99);
+      ctx.stroke();
+    }
     ctx.fillStyle = '#90a4ae'; ctx.beginPath(); ctx.arc(0, 0, wh.r * 0.55, 0, 7); ctx.fill();
     ctx.strokeStyle = '#37474f'; ctx.lineWidth = 3;
     for (let i = 0; i < 5; i++) {
       const a = wh.spin + i * Math.PI * 2 / 5;
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * wh.r * 0.9, Math.sin(a) * wh.r * 0.9); ctx.stroke();
     }
+    ctx.fillStyle = '#263238'; ctx.beginPath(); ctx.arc(0, 0, wh.r * 0.16, 0, 7); ctx.fill();
     ctx.restore();
   }
 }
@@ -948,7 +1053,9 @@ function hideOverlay() { $('overlay').classList.add('hidden'); }
 // ---------- 모드 전환 ----------
 function enterSim() {
   if (mode === 'sim') return;
-  if (totalCost() > LV().budget + 1e-6) { toast('⚠️ 예산 초과! 빔을 줄이거나 싼 자재로 바꾸세요'); sndFail(); return; }
+  // 원작처럼 예산 초과분도 관대하게: 120%까지 테스트 허용 (초과 시 ★ 감점)
+  if (totalCost() > LV().budget * 1.2 + 1e-6) { toast('⚠️ 예산 20% 초과! 빔을 줄이거나 싼 자재로 바꾸세요'); sndFail(); return; }
+  const overBudget = totalCost() > LV().budget + 1e-6;
   const roadExists = beams.some(b => b.mat === 'road' && !b.broken);
   if (!roadExists) { toast('⚠️ 도로(Road) 상판이 없어요! 1번 자재로 길을 놓으세요'); sndFail(); return; }
   pushUndoSoft();
@@ -958,7 +1065,9 @@ function enterSim() {
   for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; }
   for (const b of beams) { b.broken = false; b.strain = 0; }
   refreshMasses();
-  hideOverlay(); sndClick(); toast('▶ 시뮬레이션! 🚗 출발 버튼을 누르세요 (D)');
+  hideOverlay(); sndClick();
+  simOverBudget = overBudget;
+  toast(overBudget ? '⚠️ 예산 초과 상태로 테스트 중 (★ 감점)' : '▶ 시뮬레이션! 🚗 출발 버튼을 누르세요 (D)');
   $('hint').textContent = defaultHint();
 }
 function exitSim() {
@@ -1059,6 +1168,7 @@ window.addEventListener('pointerup', e => {
     const a = mouse.startNode, b = mouse.cur;
     if (Math.hypot(a.x - b.x, a.y - b.y) > 4) tryBuild(a, b);
   }
+  if (mouse.dragNode) { weldNodes(); refreshMasses(); updateHUD(); }
   mouse.startNode = null; mouse.dragNode = null;
 });
 function tryBuild(a, b) {
@@ -1068,10 +1178,16 @@ function tryBuild(a, b) {
   if (len > M.maxLen) { toast('너무 길어요! ' + M.name + ' 최대 ' + M.maxLen + 'px'); sndFail(); return; }
   pushUndo();
   let na = a.node, nb = b.node;
-  if (!na) na = addNode(clamp(a.x, 0, W), clamp(a.y, 0, H), false, false);
-  if (!nb) nb = addNode(clamp(b.x, 0, W), clamp(b.y, 0, H), false, false);
-  if (na === nb || beamExists(na, nb)) { refreshMasses(); updateHUD(); return; }
+  let freshA = false, freshB = false;
+  if (!na) { na = addNode(clamp(a.x, 0, W), clamp(a.y, 0, H), false, false); freshA = true; }
+  if (!nb) { nb = addNode(clamp(b.x, 0, W), clamp(b.y, 0, H), false, false); freshB = true; }
+  if (na === nb) { if (freshA) nodes = nodes.filter(x => x !== na); refreshMasses(); updateHUD(); return; }
+  // 새 노드가 기존 빔 위면 분할 → 구조 일체화
+  if (freshA) splitBeamAt(na);
+  if (freshB) splitBeamAt(nb);
+  if (beamExists(na, nb)) { refreshMasses(); updateHUD(); return; }
   beams.push({ id: beamSeq++, a: na, b: nb, mat: curMat, rest: Math.hypot(na.x - nb.x, na.y - nb.y), broken: false, strain: 0 });
+  weldNodes();
   refreshMasses(); updateHUD(); sndClick();
 }
 function eraseAt(wx, wy, soft) {

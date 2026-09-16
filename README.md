@@ -5,6 +5,10 @@
 
 > 물리 기반: [`BaddishCarrot/polybridge4DFRAME20611`](https://github.com/BaddishCarrot/polybridge4DFRAME20611) 의
 > 스프링-질점 브릿지 역학을 계승하고, 건설 에디터 + 강체 차량/화물 + 레벨/예산/성공 판정으로 확장했습니다.
+> 자재 수치 원리: Poly Bridge 공식 매뉴얼(도로 900·목재 800·철강 2000·케이블 2200) 상대 비율 +
+> "차량은 도로하고만 충돌" 원칙을 따릅니다.
+> 차량 설계: [Matter.js](https://github.com/liabru/matter-js) 공식 car 예제(MIT License)의
+> 검증된 치수(휠베이스·고마찰 바퀴·둥근 섀시)를 서스펜션 방식에 맞게 이식했습니다.
 
 ## 🎮 플레이
 
