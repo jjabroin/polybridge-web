@@ -25,7 +25,7 @@ let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
 //  구조 매핑: 거더교=road+하부보강 / 트러스교(Warren·Pratt)=wood·steel 삼각형 /
 //            아치교=steel 압축아치 / 현수교=cable+타워 / 사장교=타워+방사형cable
 const MATERIALS = {
-  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.22, breakC: -0.15, stiff: 0.9,  wpp: 0.030, maxLen: 80,  minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
+  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.12, breakC: -0.10, stiff: 1.0,  wpp: 0.030, maxLen: 80,  minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
   wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.7,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false },
   steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false },
   cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true },
@@ -221,7 +221,20 @@ function weldNodes(tol) {
     }
   }
 }
-function beamExists(a, b) { return beams.some(x => (x.a === a && x.b === b) || (x.a === b && x.b === a)); }
+function beamExists(a, b, mat) { return beams.some(x => ((x.a === a && x.b === b) || (x.a === b && x.b === a)) && (!mat || x.mat === mat)); }
+// 보강도로 (원작 원칙): 같은 구간에 겹친 목재/철강이 있으면 도로 강도 상승 (목재 +33% / 철강 +67%)
+function reinfOf(b) {
+  if (b.mat !== 'road' || b.broken) return 1;
+  let wood = false;
+  for (const x of beams) {
+    if (x.broken || x.mat === 'road') continue;
+    if ((x.a === b.a && x.b === b.b) || (x.a === b.b && x.b === b.a)) {
+      if (x.mat === 'steel') return 1.67;
+      if (x.mat === 'wood') wood = true;
+    }
+  }
+  return wood ? 1.33 : 1;
+}
 function pushUndo() {
   undoStack.push(serialize());
   if (undoStack.length > 60) undoStack.shift();
@@ -456,9 +469,10 @@ function physStep(dt) {
     const strain = (d - b.rest) / b.rest;
     b.strain = strain;
     const M = MATERIALS[b.mat];
+    const bonus = reinfOf(b); // 보강도로 합체 보너스
     const a = Math.abs(strain);
     if (a > mx) mx = a;
-    if (strain > M.breakT || strain < M.breakC) {
+    if (strain > M.breakT * bonus || strain < M.breakC * bonus) {
       b.broken = true; b.strain = 0; brokenCount++;
       burst((b.a.x + b.b.x) / 2, (b.a.y + b.b.y) / 2, MATERIALS[b.mat].color, 14);
       shake = Math.min(14, shake + 5);
@@ -834,12 +848,13 @@ function drawAnchors() {
     ctx.beginPath(); ctx.arc(n.x - 1.2, n.y - 1.2, 1.4, 0, 7); ctx.fill();
   }
 }
-function stressColor(mat, strain) {
+function stressColor(mat, strain, boost) {
   const M = MATERIALS[mat];
   if (!showStress || mode === 'build') return M.color;
   const s = strain || 0, a = Math.abs(s);
   if (a < 0.015) return M.color;
-  const lim = s > 0 ? M.breakT : Math.abs(M.breakC) > 10 ? M.breakT : Math.abs(M.breakC);
+  const lim0 = s > 0 ? M.breakT : Math.abs(M.breakC) > 10 ? M.breakT : Math.abs(M.breakC);
+  const lim = lim0 * (boost || 1);
   const k = clamp(a / lim, 0, 1);
   const hex = M.color;
   const br = parseInt(hex.slice(1, 3), 16), bg = parseInt(hex.slice(3, 5), 16), bb = parseInt(hex.slice(5, 7), 16);
@@ -852,10 +867,30 @@ function drawBeams() {
     if (b.broken) continue;
     const M = MATERIALS[b.mat];
     if (b.mat === 'road') {
+      const rb = reinfOf(b); // 보강 합체 배율 (빌드모드에서도 표시)
       ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = M.thick + 3;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
-      ctx.strokeStyle = stressColor('road', b.strain); ctx.lineWidth = M.thick;
+      ctx.strokeStyle = stressColor('road', b.strain, rb); ctx.lineWidth = M.thick;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+      // 보강 합체 표시: 겹친 목재/철강 색 테두리
+      if (rb > 1) {
+        let comp = null;
+        for (const x of beams) {
+          if (x.broken || x.mat === 'road') continue;
+          if ((x.a === b.a && x.b === b.b) || (x.a === b.b && x.b === b.a)) { comp = x.mat; if (comp === 'steel') break; }
+        }
+        if (comp) {
+          const dx = b.b.x - b.a.x, dy = b.b.y - b.a.y, d = Math.hypot(dx, dy) || 1;
+          const nx = -dy / d * (M.thick / 2 - 1), ny = dx / d * (M.thick / 2 - 1);
+          ctx.strokeStyle = MATERIALS[comp].color; ctx.lineWidth = 2.5;
+          for (const sgn of [1, -1]) {
+            ctx.beginPath();
+            ctx.moveTo(b.a.x + nx * sgn, b.a.y + ny * sgn);
+            ctx.lineTo(b.b.x + nx * sgn, b.b.y + ny * sgn);
+            ctx.stroke();
+          }
+        }
+      }
       // 중앙 차선
       ctx.strokeStyle = 'rgba(255,213,79,.85)'; ctx.lineWidth = 2; ctx.setLineDash([10, 8]);
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
@@ -876,7 +911,8 @@ function drawBeams() {
     // 과부하 발광
     if (mode === 'sim' && showStress && Math.abs(b.strain) > 0.05) {
       const M2 = MATERIALS[b.mat];
-      const lim = b.strain > 0 ? M2.breakT : (Math.abs(M2.breakC) > 10 ? M2.breakT : Math.abs(M2.breakC));
+      const lim0 = b.strain > 0 ? M2.breakT : (Math.abs(M2.breakC) > 10 ? M2.breakT : Math.abs(M2.breakC));
+      const lim = lim0 * reinfOf(b);
       if (Math.abs(b.strain) / lim > 0.7) {
         ctx.strokeStyle = b.strain > 0 ? 'rgba(244,67,54,.35)' : 'rgba(33,150,243,.35)';
         ctx.lineWidth = M.thick + 8;
@@ -1196,7 +1232,7 @@ function tryBuild(a, b) {
   // 새 노드가 기존 빔 위면 분할 → 구조 일체화
   if (freshA) splitBeamAt(na);
   if (freshB) splitBeamAt(nb);
-  if (beamExists(na, nb)) { refreshMasses(); updateHUD(); return; }
+  if (beamExists(na, nb, curMat)) { refreshMasses(); updateHUD(); return; }
   beams.push({ id: beamSeq++, a: na, b: nb, mat: curMat, rest: Math.hypot(na.x - nb.x, na.y - nb.y), broken: false, strain: 0 });
   weldNodes();
   refreshMasses(); updateHUD(); sndClick();
