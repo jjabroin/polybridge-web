@@ -189,6 +189,7 @@ function splitBeamAt(nd) {
   let best = null, bd = 8;
   for (const b of beams) {
     if (b.a === nd || b.b === nd) continue;
+    if (b.mat === 'hyd') continue; // 유압은 분할하지 않음 (3점식 통째 유지)
     const c = circleSeg(nd.x, nd.y, 0, { x1: b.a.x, y1: b.a.y, x2: b.b.x, y2: b.b.y });
     const d = Math.hypot(nd.x - c.qx, nd.y - c.qy);
     if (c.t < 0.05 || c.t > 0.95) continue; // 끝점 근처는 분할 대신 스냅으로 처리
@@ -1540,9 +1541,38 @@ function tryBuild(a, b) {
     refreshMasses(); updateHUD();
   };
   if (na === nb) { rollback(); return; }
-  // 새 노드가 기존 빔 위면 분할 → 구조 일체화
+  // 새 노드가 기존 빔 위면 분할 → 구조 일체화 (유압은 분할하지 않고 통째로 유지)
   if (freshA) splitBeamAt(na);
   if (freshB) splitBeamAt(nb);
+  // 유압 3점식: 양끝+중간 조인트 피스톤 1개로 생성 (분할 없음, 중간점 부착 가능)
+  // 길이 검증은 반쪽 토막 기준 (중간 조인트를 거치면 전체가 최대길이를 넘어도 됨)
+  if (curMat === 'hyd') {
+    const total = Math.hypot(na.x - nb.x, na.y - nb.y);
+    if (total < 30) { toast('유압은 최소 30px 필요해요'); rollback(); return; }
+    const mx = (na.x + nb.x) / 2, my = (na.y + nb.y) / 2;
+    let mid = findNodeAt(mx, my, 12);
+    if (mid === na || mid === nb) mid = null;
+    if (mid) {
+      const l1 = Math.hypot(mid.x - na.x, mid.y - na.y), l2 = Math.hypot(mid.x - nb.x, mid.y - nb.y);
+      if (l1 < 12 || l2 < 12) mid = null; // 너무 치우치면 정중앙에 새로
+    }
+    if (!mid) mid = addNode(mx, my, false, false);
+    const h1 = Math.hypot(mid.x - na.x, mid.y - na.y), h2 = Math.hypot(mid.x - nb.x, mid.y - nb.y);
+    if (h1 > M.maxLen + 0.5 || h2 > M.maxLen + 0.5 || h1 < M.minLen - 0.5 || h2 < M.minLen - 0.5) {
+      toast('유압 반쪽 길이가 범위를 벗어났어요'); rollback(); return;
+    }
+    const mkHalf = (p, q) => {
+      if (beamExists(p, q, 'hyd')) return true;
+      beams.push({ id: beamSeq++, a: p, b: q, mat: 'hyd', rest: Math.hypot(p.x - q.x, p.y - q.y), broken: false, strain: 0 });
+      return true;
+    };
+    const before = beams.length;
+    mkHalf(na, mid); mkHalf(mid, nb);
+    if (beams.length === before) { rollback(); return; } // 둘 다 중복이면 취소
+    weldNodes();
+    refreshMasses(); updateHUD(); sndClick(); autosaveSoon();
+    return;
+  }
   // 중간 부착: 드래그 경로상의 기존 조인트에서 자동 분할.
   // 길이 검증은 전체가 아니라 토막별로 → 중간에 붙이면 자재 최대길이를 넘겨도 됨.
   const abx = nb.x - na.x, aby = nb.y - na.y;
