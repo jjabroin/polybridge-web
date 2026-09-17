@@ -316,7 +316,19 @@ function weldNodes(tol) {
   }
 }
 function beamExists(a, b, mat) { return beams.some(x => ((x.a === a && x.b === b) || (x.a === b && x.b === a)) && (!mat || x.mat === mat)); }
-// 도로 받침 판정: 트러스(비도로 부재)와 공유 노드가 있거나 끝점이 고정이면 받침 있음.
+// 연결 검사: 앵커에서 도달 가능한 노드 집합 (BFS). 닿지 않는 구조물은 붕괴 확정.
+function computeGrounded() {
+  const seen = new Set(nodes.filter(n => n.anchor || n.fixed));
+  const adj = new Map();
+  const add = (a, b) => { if (!adj.has(a)) adj.set(a, []); adj.get(a).push(b); };
+  for (const b of beams) { if (b.broken) continue; add(b.a, b.b); add(b.b, b.a); }
+  const q = [...seen];
+  while (q.length) {
+    const n = q.pop();
+    for (const m of (adj.get(n) || [])) if (!seen.has(m)) { seen.add(m); q.push(m); }
+  }
+  return seen;
+}
 // 받침 있는 도로는 휨·처짐으로 안 끊어짐 — 밑의 목재·철강이 먼저 끊기고 나서야 따라 끊김 (원작 원칙).
 function roadSupported(b) {
   if (b.a.fixed || b.a.anchor || b.b.fixed || b.b.anchor) return true;
@@ -1070,6 +1082,7 @@ function render() {
   if (mode === 'build' && showGrid) drawGrid();
   drawAnchors(); drawBeams(); drawDebris(); drawNodes(); drawBodies(); drawCar(); drawFlag(L);
   drawParticles(); drawPreview();
+  if (mode === 'build') drawUngrounded();
   ctx.restore();
   shake *= 0.88; if (shake < 0.2) shake = 0;
   // 파단 플래시 (빨간 테두리)
@@ -1339,6 +1352,32 @@ function drawBeams() {
     ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
   }
 }
+// 미연결 구조 빨간 표시 (건설 모드) — 앵커에 닿지 않으면 주행 시 확정 붕괴
+function drawUngrounded() {
+  const g = computeGrounded();
+  let any = false;
+  for (const b of beams) if (!g.has(b.a) || !g.has(b.b)) { any = true; break; }
+  if (!any) {
+    for (const n of nodes) if (!n.anchor && !n.fixed && !g.has(n) && beams.some(x => x.a === n || x.b === n)) { any = true; break; }
+  }
+  if (!any) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(244,67,54,.9)'; ctx.lineWidth = 3; ctx.setLineDash([7, 5]);
+  for (const b of beams) {
+    if (g.has(b.a) && g.has(b.b)) continue;
+    ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(244,67,54,.95)';
+  for (const n of nodes) {
+    if (n.anchor || g.has(n)) continue;
+    ctx.beginPath(); ctx.arc(n.x, n.y, 6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('!', n.x, n.y + 3);
+    ctx.fillStyle = 'rgba(244,67,54,.95)';
+  }
+  ctx.restore();
+}
 function drawNodes() {
   for (const n of nodes) {
     if (n.anchor) continue;
@@ -1525,6 +1564,8 @@ function enterSim() {
   const overBudget = !LV().free && totalCost() > LV().budget + 1e-6;
   const roadExists = beams.some(b => b.mat === 'road' && !b.broken);
   if (!roadExists) { toast('⚠️ 도로(Road) 상판이 없어요! 1번 자재로 길을 놓으세요'); sndFail(); return; }
+  const _g = computeGrounded();
+  const loose = beams.some(b => !_g.has(b.a) || !_g.has(b.b));
   pushUndoSoft();
   buildSnap = serialize();
   simCost = totalCost(); // 시작 예산 고정
@@ -1538,8 +1579,10 @@ function enterSim() {
   refreshMasses();
   hideOverlay(); sndClick();
   simOverBudget = overBudget;
-  toast(overBudget ? '⚠️ 예산 초과 상태로 테스트 중 (★ 감점)' : '▶ 시뮬레이션! 🚗 출발 버튼을 누르세요 (D)');
-  $('hint').textContent = defaultHint();
+  let h = defaultHint();
+  if (loose) h = '⚠️ 빨간 점선(미연결)부터 무너집니다! ' + h;
+  else if (simOverBudget) h = '⚠️ 예산 초과 (★ 감점) · ' + h;
+  $('hint').textContent = h;
 }
 function exitSim() {
   if (mode === 'build') return;
