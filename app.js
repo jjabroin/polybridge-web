@@ -12,6 +12,7 @@ const GRAV = 1500;            // px/s^2
 const FIXED_DT = 1 / 60;
 const ITER = 30;              // constraint 반복 (정적 처짐·트램펄린 억제)
 const GRID = 20;
+const BARREL_FRAC = 0.62; // 유압 칼라(러그점) 위치 — 몸통 쪽 고정
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -99,7 +100,6 @@ let loseTimer = 0, stuckTimer = 0, flipTimer = 0, goalTimer = 0;
 let stuckX = 0, stuckT = 0;
 let debris = [];       // 파단 잔해 (시뮬 전용)
 let hydPhase = 1.0;    // 유압 위상 (1.0 중립 ↔ 1.5 신장 / 0.5 수축)
-let pistonAsm = [];    // 유압 강직 어셈블리 {A,M,B,f} — 중간점이 꺾이지 않게 직선 유지
 let simOverBudget = false;
 let simCost = 0; // 주행 시작 시점 비용 고정 (시뮬 중 기하학 변동에 흔들리지 않음)
 let flagWave = 0;
@@ -158,7 +158,7 @@ function goalX() { return LV().right + 60; }
 
 // ---------- 노드/빔 ----------
 function addNode(x, y, fixed, anchor) {
-  const n = { id: nodeSeq++, x, y, px: x, py: y, fx: 0, fy: 0, mass: 1.2, fixed: !!fixed, anchor: !!anchor, y0: y };
+  const n = { id: nodeSeq++, x, y, px: x, py: y, fx: 0, fy: 0, mass: 1.2, fixed: !!fixed, anchor: !!anchor, y0: y, lug: null };
   nodes.push(n); return n;
 }
 function nodeMass(n) {
@@ -169,7 +169,23 @@ function nodeMass(n) {
   }
   return Math.max(0.6, m);
 }
-function refreshMasses() { for (const n of nodes) n.mass = nodeMass(n); }
+function refreshMasses() { for (const n of nodes) n.mass = nodeMass(n); seatLugs(); }
+// 유압 러그점 시팅: 칼라 위치(몸통 고정)에 고정. 편집 후 호출 (시뮬 중은 매 스텝 별도 처리).
+function lugPoint(L) {
+  const dx = L.b.x - L.a.x, dy = L.b.y - L.a.y;
+  const d = Math.hypot(dx, dy) || 1e-6;
+  const t = Math.min(L.len, d * 0.95) / d;
+  return { x: L.a.x + dx * t, y: L.a.y + dy * t, f: t };
+}
+function seatLugs() {
+  for (const n of nodes) {
+    if (!n.lug) continue;
+    const L = n.lug;
+    if (L.a === L.b || !nodes.includes(L.a) || !nodes.includes(L.b)) { n.lug = null; continue; }
+    const p = lugPoint(L);
+    n.x = p.x; n.y = p.y; n.px = p.x; n.py = p.y;
+  }
+}
 function beamLen(b) { return Math.hypot(b.a.x - b.b.x, b.a.y - b.b.y); }
 function beamCost(b) { return beamLen(b) * MATERIALS[b.mat].cost; }
 function totalCost() { let s = 0; for (const b of beams) s += beamCost(b); return s; }
@@ -228,6 +244,14 @@ function weldNodes(tol) {
         if (bm.b === b) bm.b = a;
         bm.rest = Math.hypot(bm.a.x - bm.b.x, bm.a.y - bm.b.y);
       }
+      // 유압 러그 참조도 생존 노드로 추적
+      for (const n2 of nodes) {
+        if (n2.lug) {
+          if (n2.lug.a === b) n2.lug.a = a;
+          if (n2.lug.b === b) n2.lug.b = a;
+          if (n2.lug.a === n2.lug.b) n2.lug = null;
+        }
+      }
       beams = beams.filter(x => x.a !== x.b);
       const seen = new Set();
       beams = beams.filter(x => {
@@ -270,7 +294,8 @@ function pushUndo() {
 function serialize() {
   const idx = new Map(nodes.map((n, i) => [n.id, i]));
   return JSON.stringify({
-    nodes: nodes.map(n => ({ x: Math.round(n.x * 10) / 10, y: Math.round(n.y * 10) / 10, fixed: n.fixed, anchor: n.anchor })),
+    nodes: nodes.map(n => ({ x: Math.round(n.x * 10) / 10, y: Math.round(n.y * 10) / 10, fixed: n.fixed, anchor: n.anchor,
+      lug: n.lug ? { a: idx.get(n.lug.a.id), b: idx.get(n.lug.b.id), len: Math.round(n.lug.len * 10) / 10 } : undefined })),
     beams: beams.map(b => ({ a: idx.get(b.a.id), b: idx.get(b.b.id), mat: b.mat })),
   });
 }
@@ -282,6 +307,12 @@ function deserialize(json) {
     if (nodes[b.a] && nodes[b.b] && !beamExists(nodes[b.a], nodes[b.b], b.mat))
       beams.push({ id: beamSeq++, a: nodes[b.a], b: nodes[b.b], mat: b.mat, rest: Math.hypot(nodes[b.a].x - nodes[b.b].x, nodes[b.a].y - nodes[b.b].y), broken: false, strain: 0 });
   }
+  // 러그 복원 (유압 칼라점)
+  d.nodes.forEach((n, i) => {
+    if (n.lug && nodes[n.lug.a] && nodes[n.lug.b] && nodes[i]) {
+      nodes[i].lug = { a: nodes[n.lug.a], b: nodes[n.lug.b], len: n.lug.len };
+    }
+  });
   refreshMasses();
 }
 function defaultBridge() {
@@ -493,8 +524,20 @@ function physStep(dt) {
       b.rest = Math.abs(step) >= Math.abs(dd) ? tgt : b.rest + step;
     }
   }
-  // 1) 노드 적분 (Verlet)
+  // 러그 하중 전달: 칼라점에 걸린 힘을 양끝으로 분배 (지레비)
+  for (const n of nodes) {
+    if (!n.lug || (!n.fx && !n.fy)) continue;
+    const L = n.lug;
+    if (!nodes.includes(L.a) || !nodes.includes(L.b)) { n.lug = null; continue; }
+    const d = Math.hypot(L.b.x - L.a.x, L.b.y - L.a.y) || 1e-6;
+    const f = clamp(Math.min(L.len, d * 0.95) / d, 0, 1);
+    if (!L.a.fixed) { L.a.fx += n.fx * (1 - f); L.a.fy += n.fy * (1 - f); }
+    if (!L.b.fixed) { L.b.fx += n.fx * f; L.b.fy += n.fy * f; }
+    n.fx = 0; n.fy = 0;
+  }
+  // 1) 노드 적분 (Verlet) — 러그는 위치 지정식이므로 적분 제외
   for (const n of nodes) {    if (n.fixed) { n.px = n.x; n.py = n.y; continue; }
+    if (n.lug) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; continue; }
     const vx = (n.x - n.px) * 0.99, vy = (n.y - n.py) * 0.99;
     n.px = n.x; n.py = n.y;
     n.x += vx + (n.fx / n.mass) * dt * dt;
@@ -531,22 +574,13 @@ function physStep(dt) {
       if (car) collideCar(couple);
       for (const b of bodies) collideBody(b, couple);
     }
-    // 피스톤 강직: 중간점을 양끝 직선상으로 복귀 (유압이 꺾여 나눠지지 않게).
-    // halves가 모두 온전할 때만 유지 (부러지면 잔해 물리 우선).
-    if (it % 3 === 0) {
-      for (const P of pistonAsm) {
-        if (P.M.fixed) continue;
-        let halves = 0;
-        for (const b of beams) {
-          if (b.broken || b.mat !== 'hyd') continue;
-          if ((b.a === P.A && b.b === P.M) || (b.a === P.M && b.b === P.A) ||
-              (b.a === P.M && b.b === P.B) || (b.a === P.B && b.b === P.M)) halves++;
-        }
-        if (halves < 2) continue;
-        const tx = P.A.x + (P.B.x - P.A.x) * P.f, ty = P.A.y + (P.B.y - P.A.y) * P.f;
-        P.M.x += (tx - P.M.x) * 0.25;
-        P.M.y += (ty - P.M.y) * 0.25;
-      }
+    // 유압 러그 시팅: 칼라점을 몸통 위치에 고정 (꺾임 원천 차단 — 통짜 유지)
+    for (const n of nodes) {
+      if (!n.lug || n.fixed) continue;
+      const L = n.lug;
+      if (!nodes.includes(L.a) || !nodes.includes(L.b)) { n.lug = null; continue; }
+      const p = lugPoint(L);
+      n.x = p.x; n.y = p.y; n.px = p.x; n.py = p.y;
     }
   }
   // 5) 파단 판정 + 변형률 기록
@@ -1178,28 +1212,22 @@ function drawBeams() {
       }
       ctx.stroke();
     } else if (b.mat === 'hyd') {
-      // 유압 피스톤: 실린더 + 로드
-      const dx = b.b.x - b.a.x, dy = b.b.y - b.a.y;
-      const mx = b.a.x + dx * 0.62, my = b.a.y + dy * 0.62;
+      // 유압 피스톤 통짜 1개: 실린더(A→칼라) + 로드(칼라→B) + 빨간 부착 3점
+      let cx = b.a.x + (b.b.x - b.a.x) * BARREL_FRAC, cy = b.a.y + (b.b.y - b.a.y) * BARREL_FRAC;
+      const lug = nodes.find(n => n.lug && ((n.lug.a === b.a && n.lug.b === b.b) || (n.lug.a === b.b && n.lug.b === b.a)));
+      if (lug) { cx = lug.x; cy = lug.y; }
       ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = M.thick + 3;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
       ctx.strokeStyle = '#b25c00'; ctx.lineWidth = M.thick;
-      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(mx, my); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(cx, cy); ctx.stroke();
       ctx.strokeStyle = '#eceff1'; ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
-      // 중간 조인트(다른 유압과 공유하는 끝점)에 주황 연결점 표시 — 여기에 부착!
-      for (const E of [b.a, b.b]) {
-        let shared = false;
-        for (const x of beams) {
-          if (x === b || x.broken || x.mat !== 'hyd') continue;
-          if (x.a === E || x.b === E) { shared = true; break; }
-        }
-        if (shared) {
-          ctx.fillStyle = '#ff8f00';
-          ctx.beginPath(); ctx.arc(E.x, E.y, 6.5, 0, 7); ctx.fill();
-          ctx.fillStyle = '#fff3e0';
-          ctx.beginPath(); ctx.arc(E.x, E.y, 2.5, 0, 7); ctx.fill();
-        }
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+      // 빨간 부착 3점 (양끝 + 칼라)
+      for (const [px, py] of [[b.a.x, b.a.y], [cx, cy], [b.b.x, b.b.y]]) {
+        ctx.fillStyle = '#e53935';
+        ctx.beginPath(); ctx.arc(px, py, 6.5, 0, 7); ctx.fill();
+        ctx.fillStyle = '#ffebee';
+        ctx.beginPath(); ctx.arc(px, py, 2.5, 0, 7); ctx.fill();
       }
     } else if (b.mat === 'rroad') {
       // 강화도로: 두꺼운 노면에 주황 보강 테두리 + 이중 중앙선
@@ -1437,50 +1465,6 @@ function enterSim() {
   for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; n.y0 = n.y; }
   for (const b of beams) { b.broken = false; b.strain = 0; b.rest0 = b.rest; b.yielded = false; b.dmg = 0; }
   debris = []; hydPhase = 1.0; updateHydUI();
-  pistonAsm = [];
-  // 피스톤 어셈블리 구성: 중간점을 공유하는 2개 유압 반쪽이 일직선이면 강직 연결 (꺾임 방지).
-  // 저장 없이 매 시뮬 시작 시 형상에서 도출 (이미 꺾인 힌지는 제외).
-  for (let i = 0; i < beams.length; i++) {
-    for (let j = i + 1; j < beams.length; j++) {
-      const x = beams[i], y = beams[j];
-      if (x.mat !== 'hyd' || y.mat !== 'hyd') continue;
-      const shared = [x.a, x.b].find(n => n === y.a || n === y.b);
-      if (!shared || shared.fixed) continue;
-      const A = (x.a === shared) ? x.b : x.a;
-      const B = (y.a === shared) ? y.b : y.a;
-      if (A === B) continue;
-      const d1 = Math.hypot(shared.x - A.x, shared.y - A.y), d2 = Math.hypot(shared.x - B.x, shared.y - B.y);
-      if (d1 < 1 || d2 < 1) continue;
-      const angA = Math.atan2(shared.y - A.y, shared.x - A.x);
-      const angB = Math.atan2(B.y - shared.y, B.x - shared.x);
-      let dd = Math.abs(angA - angB);
-      if (dd > Math.PI) dd = Math.PI * 2 - dd;
-      if (dd > 0.26) continue; // 15° 이상 꺾이면 힌지로 둠
-      pistonAsm.push({ A, M: shared, B, f: d1 / (d1 + d2) });
-    }
-  }
-  // 피스톤 어셈블리 구성: 중간점을 공유하는 2개 유압 반쪽이 일직선이면 강직 연결 (꺾임 방지).
-  // 저장 없이 매 시뮬 시작 시 형상에서 도출 (이미 꺾인 힌지는 제외).
-  pistonAsm = [];
-  for (let i = 0; i < beams.length; i++) {
-    for (let j = i + 1; j < beams.length; j++) {
-      const x = beams[i], y = beams[j];
-      if (x.mat !== 'hyd' || y.mat !== 'hyd') continue;
-      const shared = [x.a, x.b].find(n => n === y.a || n === y.b);
-      if (!shared || shared.fixed) continue;
-      const A = (x.a === shared) ? x.b : x.a;
-      const B = (y.a === shared) ? y.b : y.a;
-      if (A === B) continue;
-      const d1 = Math.hypot(shared.x - A.x, shared.y - A.y), d2 = Math.hypot(shared.x - B.x, shared.y - B.y);
-      if (d1 < 1 || d2 < 1) continue;
-      const angA = Math.atan2(shared.y - A.y, shared.x - A.x);
-      const angB = Math.atan2(B.y - shared.y, B.x - shared.x);
-      let dd = Math.abs(angA - angB);
-      if (dd > Math.PI) dd = Math.PI * 2 - dd;
-      if (dd > 0.26) continue; // 15° 이상 꺾이면 힌지로 둠
-      pistonAsm.push({ A, M: shared, B, f: d1 / (d1 + d2) });
-    }
-  }
   for (const b of beams) { b.broken = false; b.strain = 0; }
   refreshMasses();
   hideOverlay(); sndClick();
@@ -1549,7 +1533,8 @@ canvas.addEventListener('pointerdown', e => {
     mouse.startNode = sp; mouse.cur = sp;
   } else if (tool === 'move') {
     const n = findNodeAt(p.wx, p.wy, 22);
-    mouse.dragNode = (n && !n.fixed) ? n : null;
+    // 러그점(유압 칼라)은 빔을 따라 자동 이동하므로 직접 이동 불가
+    mouse.dragNode = (n && !n.fixed && !n.lug) ? n : null;
     if (mouse.dragNode) pushUndo();
   } else if (tool === 'erase') {
     eraseAt(p.wx, p.wy);
@@ -1618,32 +1603,27 @@ function tryBuild(a, b) {
   // 새 노드가 기존 빔 위면 분할 → 구조 일체화 (유압은 분할하지 않고 통째로 유지)
   if (freshA) splitBeamAt(na);
   if (freshB) splitBeamAt(nb);
-  // 유압 3점식: 양끝+중간 조인트 피스톤 1개로 생성 (분할 없음, 중간점 부착 가능).
-  // 중간점은 칼라 위치( A에서 62% )에 — 주황점이 곧 진짜 조인트.
-  // 길이 검증은 반쪽 토막 기준 (중간 조인트를 거치면 전체가 최대길이를 넘어도 됨)
+  // 유압 통짜 1개 + 칼라 러그점: 양끝+중간 3점이 빨간 부착점.
+  // 중간점은 칼라 위치(A에서 62%, 몸통 고정)에 진짜 조인트로 생성 — 여기에 자재 부착.
+  // 분할 없음 (유압 빔은 절대 안 잘림).
   if (curMat === 'hyd') {
     const total = Math.hypot(na.x - nb.x, na.y - nb.y);
     if (total < 40) { toast('유압은 최소 40px 필요해요'); rollback(); return; }
-    const mx = na.x + (nb.x - na.x) * 0.62, my = na.y + (nb.y - na.y) * 0.62;
+    if (total > M.maxLen + 0.5) { toast('너무 길어요! 유압 최대 ' + M.maxLen + 'px'); sndFail(); rollback(); return; }
+    if (beamExists(na, nb, 'hyd')) { rollback(); return; }
+    const hb = { id: beamSeq++, a: na, b: nb, mat: 'hyd', rest: total, broken: false, strain: 0 };
+    beams.push(hb);
+    const mx = na.x + (nb.x - na.x) * BARREL_FRAC, my = na.y + (nb.y - na.y) * BARREL_FRAC;
     let mid = findNodeAt(mx, my, 12);
     if (mid === na || mid === nb) mid = null;
-    if (mid) {
-      const l1 = Math.hypot(mid.x - na.x, mid.y - na.y), l2 = Math.hypot(mid.x - nb.x, mid.y - nb.y);
-      if (l1 < 12 || l2 < 12) mid = null; // 너무 치우치면 정중앙에 새로
+    if (mid && (mid.fixed || mid.anchor)) mid = null;
+    if (mid && beams.some(x => x.a === mid || x.b === mid)) mid = null; // 이미 연결된 점은 건드리지 않음
+    if (!mid) {
+      mid = addNode(mx, my, false, false);
+      mid.lug = { a: na, b: nb, len: total * BARREL_FRAC };
+    } else {
+      mid.lug = { a: na, b: nb, len: Math.hypot(mid.x - na.x, mid.y - na.y) };
     }
-    if (!mid) mid = addNode(mx, my, false, false);
-    const h1 = Math.hypot(mid.x - na.x, mid.y - na.y), h2 = Math.hypot(mid.x - nb.x, mid.y - nb.y);
-    if (h1 > M.maxLen + 0.5 || h2 > M.maxLen + 0.5 || h1 < M.minLen - 0.5 || h2 < M.minLen - 0.5) {
-      toast('유압 반쪽 길이가 범위를 벗어났어요'); rollback(); return;
-    }
-    const mkHalf = (p, q) => {
-      if (beamExists(p, q, 'hyd')) return true;
-      beams.push({ id: beamSeq++, a: p, b: q, mat: 'hyd', rest: Math.hypot(p.x - q.x, p.y - q.y), broken: false, strain: 0 });
-      return true;
-    };
-    const before = beams.length;
-    mkHalf(na, mid); mkHalf(mid, nb);
-    if (beams.length === before) { rollback(); return; } // 둘 다 중복이면 취소
     weldNodes();
     refreshMasses(); updateHUD(); sndClick(); autosaveSoon();
     return;
@@ -1711,11 +1691,21 @@ function eraseAt(wx, wy, soft) {
     if (!soft) pushUndo();
     beams = beams.filter(x => x.a !== n && x.b !== n);
     nodes = nodes.filter(x => x !== n);
+    pruneNodes(); // 고아 러그점 등 정리
     refreshMasses(); updateHUD(); autosaveSoon();
   }
 }
 function pruneNodes() {
-  nodes = nodes.filter(n => n.fixed || n.anchor || beams.some(b => b.a === n || b.b === n));
+  // 피스톤이 사라진 러그점은 일반점으로 (유압 빔이 있어야 유지)
+  for (const n of nodes) {
+    if (n.lug) {
+      const L = n.lug;
+      const alive = beams.some(b => !b.broken && b.mat === 'hyd' &&
+        ((b.a === L.a && b.b === L.b) || (b.a === L.b && b.b === L.a)));
+      if (!alive) n.lug = null;
+    }
+  }
+  nodes = nodes.filter(n => n.fixed || n.anchor || n.lug || beams.some(b => b.a === n || b.b === n));
 }
 
 // ---------- 키보드 ----------
