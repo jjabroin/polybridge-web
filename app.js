@@ -21,15 +21,17 @@ let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
 // 원리 (Poly Bridge 공식 스펙에서 도출한 상대 비율 — wood=1 기준):
 //  비용: road 1.1 / wood 1 / steel 2.5 / cable 2 | 강도: road 1.125 / wood 1 / steel 2.5 / cable 2.75(인장전용)
 //  무게: steel > road > wood > cable | 길이: road=wood(짧음) < steel(김) < cable(무제한급)
+//  buckLen: 이 길이 초과 압축재는 오일러 좌굴로 한계 저하 (한계 ∝ 1/L²)
+//  yieldR: 항복비 — 초과 시 영구 변형(소성). 콘크리트 취성(0.95) / 목재(0.7) / 강재 연성(0.5)
+const MATERIALS = {
+  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.20, breakC: -0.13, stiff: 1.0,  wpp: 0.030, maxLen: 120, minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true, buckLen: 60, yieldR: 0.95 },
+  wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.024, breakC: -0.020, stiff: 0.8,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false, buckLen: 80, yieldR: 0.7 },
+  steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false, buckLen: 110, yieldR: 0.5 },
+  cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true, buckLen: 0, yieldR: 0.8 },
+};
 //  충돌: 차량은 ROAD하고만 충돌 (원작 원칙). cable은 어떤 강체와도 충돌하지 않는 순수 인장재.
 //  구조 매핑: 거더교=road+하부보강 / 트러스교(Warren·Pratt)=wood·steel 삼각형 /
 //            아치교=steel 압축아치 / 현수교=cable+타워 / 사장교=타워+방사형cable
-const MATERIALS = {
-  road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.20, breakC: -0.13, stiff: 1.0,  wpp: 0.030, maxLen: 120, minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true },
-  wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.20, breakC: -0.13, stiff: 0.8,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false },
-  steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false },
-  cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true },
-};
 const MAT_ORDER = ['road', 'wood', 'steel', 'cable'];
 
 // ---------- 차량 ----------
@@ -510,11 +512,28 @@ function physStep(dt) {
     b.strain = strain;
     const M = MATERIALS[b.mat];
     const bonus = reinfOf(b); // 보강도로 합체 보너스
+    const { limT, limC } = beamLimits(b, strain);
     const a = Math.abs(strain);
     if (a > mx) mx = a;
-    if (strain > M.breakT * bonus || strain < M.breakC * bonus) {
+    if (strain > limT || strain < limC) {
       breakBeam(b);
       continue;
+    }
+    // 소성 (영구 변형): 항복 초과분만큼 rest가 영구히 변함 — 붕괴 전 징조(처짐)로 보임.
+    // rest가 늘면 변형률이 완화되어 자기 제한됨 (진행하면 파단, 버티면 안정화).
+    const yT = limT * M.yieldR, yC = limC * M.yieldR;
+    if (strain > yT || strain < yC) {
+      b.yielded = true;
+      const r0 = b.rest0 || b.rest;
+      const over = strain > 0 ? (strain - yT) : (strain - yC);
+      const cap = strain > 0 ? 0.08 : -0.05;
+      const cur = (b.rest - r0) / r0;
+      if ((cap > 0 && cur < cap) || (cap < 0 && cur > cap)) {
+        b.rest += over * b.rest * 0.1;
+        const now = (b.rest - r0) / r0;
+        if (cap > 0 && now > cap) b.rest = r0 * (1 + cap);
+        if (cap < 0 && now < cap) b.rest = r0 * (1 + cap);
+      }
     }
     // 휨모멘트 파단 (보 이론 M∝wL²): 긴 도로는 짧은 구간으로 나누거나 받쳐야 한다.
     // 40px+경차 ≈ 0.8M / 80px+경차 ≈ 4.8M / 120px+경차 ≈ 14M → 한계 12M
@@ -774,7 +793,16 @@ function collideBody(b, couple) {
 }
 
 // ---------- 파티클 ----------
-// 부재 파단 (공통 처리 — 파티클·화면 피드백 포함)
+// 부재 한계 (보강 보너스 + 오일러 좌굴 반영 — 세장한 압축재는 조기 좌굴)
+function beamLimits(b, strain) {
+  const M = MATERIALS[b.mat];
+  const bonus = reinfOf(b);
+  let limT = M.breakT * bonus, limC = M.breakC * bonus;
+  if (strain < 0 && M.breakC > -10 && M.buckLen) {
+    limC *= Math.min(1, (M.buckLen / b.rest) ** 2);
+  }
+  return { limT, limC };
+}
 function breakBeam(b) {
   if (b.broken) return;
   b.broken = true; b.strain = 0; brokenCount++;
@@ -939,6 +967,22 @@ function drawAnchors() {
     ctx.beginPath(); ctx.arc(n.x - 1.2, n.y - 1.2, 1.4, 0, 7); ctx.fill();
   }
 }
+function hexRgb(hex) {
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+}
+// 빔 최종 색 (응력 + 항복 틴트 — 소성한 부재는 노랗게)
+function beamColor(b) {
+  const boost = b.mat === 'road' ? reinfOf(b) : 1;
+  let col = stressColor(b.mat, b.strain, boost);
+  if (b.yielded && mode === 'sim') {
+    let r, g, bl;
+    if (col[0] === '#') [r, g, bl] = hexRgb(col);
+    else [r, g, bl] = col.slice(4, -1).split(',').map(Number);
+    r = Math.round(r + (255 - r) * 0.45); g = Math.round(g + (213 - g) * 0.45); bl = Math.round(bl + (79 - bl) * 0.45);
+    col = `rgb(${r},${g},${bl})`;
+  }
+  return col;
+}
 function stressColor(mat, strain, boost) {
   const M = MATERIALS[mat];
   if (!showStress || mode === 'build') return M.color;
@@ -961,7 +1005,7 @@ function drawBeams() {
       const rb = reinfOf(b); // 보강 합체 배율 (빌드모드에서도 표시)
       ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = M.thick + 3;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
-      ctx.strokeStyle = stressColor('road', b.strain, rb); ctx.lineWidth = M.thick;
+      ctx.strokeStyle = beamColor(b); ctx.lineWidth = M.thick;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
       // 보강 합체 표시: 겹친 목재/철강 색 테두리
       if (rb > 1) {
@@ -987,12 +1031,12 @@ function drawBeams() {
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
       ctx.setLineDash([]);
     } else if (b.mat === 'cable') {
-      ctx.strokeStyle = stressColor('cable', b.strain); ctx.lineWidth = M.thick;
+      ctx.strokeStyle = beamColor(b); ctx.lineWidth = M.thick;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
     } else {
       ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = M.thick + 2;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
-      ctx.strokeStyle = stressColor(b.mat, b.strain); ctx.lineWidth = M.thick;
+      ctx.strokeStyle = beamColor(b); ctx.lineWidth = M.thick;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
       if (b.mat === 'wood') {
         ctx.strokeStyle = 'rgba(90,55,20,.6)'; ctx.lineWidth = 1.5;
@@ -1001,9 +1045,8 @@ function drawBeams() {
     }
     // 과부하 발광
     if (mode === 'sim' && showStress && Math.abs(b.strain) > 0.05) {
-      const M2 = MATERIALS[b.mat];
-      const lim0 = b.strain > 0 ? M2.breakT : (Math.abs(M2.breakC) > 10 ? M2.breakT : Math.abs(M2.breakC));
-      const lim = lim0 * reinfOf(b);
+      const { limT, limC } = beamLimits(b, b.strain);
+      const lim = b.strain > 0 ? limT : (Math.abs(limC) > 10 ? limT : Math.abs(limC));
       if (Math.abs(b.strain) / lim > 0.7) {
         ctx.strokeStyle = b.strain > 0 ? 'rgba(244,67,54,.35)' : 'rgba(33,150,243,.35)';
         ctx.lineWidth = M.thick + 8;
@@ -1202,6 +1245,7 @@ function enterSim() {
   mode = 'sim'; result = null; simTime = 0; dispatched = false;
   maxStrainSeen = 0; brokenCount = 0; bodies = []; car = null; particles = [];
   for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; n.y0 = n.y; }
+  for (const b of beams) { b.broken = false; b.strain = 0; b.rest0 = b.rest; b.yielded = false; }
   for (const b of beams) { b.broken = false; b.strain = 0; }
   refreshMasses();
   hideOverlay(); sndClick();
