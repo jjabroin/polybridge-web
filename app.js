@@ -23,10 +23,14 @@ let cam = { cx: W / 2, cy: H / 2, z: 1 };
 function fitCamera() { cam.cx = W / 2; cam.cy = H / 2; cam.z = 1; clampCam(); updateZoomUI(); }
 function clampCam() {
   cam.z = clamp(cam.z, 0.45, 3);
+  const b = camBounds();
+  cam.cx = clamp(cam.cx, b.x0, b.x1);
+  cam.cy = clamp(cam.cy, b.y0, b.y1);
+}
+function camBounds() {
   const vw = view.cw / (view.s * cam.z), vh = view.ch / (view.s * cam.z);
   const mx = Math.max(200, (W - vw) / 2 + 200), my = Math.max(150, (H - vh) / 2 + 150);
-  cam.cx = clamp(cam.cx, W / 2 - mx, W / 2 + mx);
-  cam.cy = clamp(cam.cy, H / 2 - my, H / 2 + my);
+  return { x0: W / 2 - mx, x1: W / 2 + mx, y0: H / 2 - my, y1: H / 2 + my };
 }
 function effS() { return view.s * cam.z; }
 function w2s(x, y) { const s = effS(); return [view.cw / 2 + (x - cam.cx) * s, view.ch / 2 + (y - cam.cy) * s]; }
@@ -43,6 +47,17 @@ function updateZoomUI() {
   const sl = $('zoomSlider'), lb = $('zoomLabel');
   if (sl) sl.value = Math.round(cam.z * 100);
   if (lb) lb.textContent = Math.round(cam.z * 100) + '%';
+  const b = camBounds();
+  const px = $('panX'), py = $('panY');
+  if (px) px.value = Math.round((cam.cx - b.x0) / (b.x1 - b.x0) * 1000);
+  if (py) py.value = Math.round((cam.cy - b.y0) / (b.y1 - b.y0) * 1000);
+}
+function panSliderTo() {
+  const b = camBounds();
+  const px = $('panX'), py = $('panY');
+  if (px && px.value !== undefined && px.value !== '') cam.cx = b.x0 + (+px.value / 1000) * (b.x1 - b.x0);
+  if (py && py.value !== undefined && py.value !== '') cam.cy = b.y0 + (+py.value / 1000) * (b.y1 - b.y0);
+  clampCam(); updateZoomUI();
 }
 
 // ---------- 자재 ----------
@@ -1489,7 +1504,7 @@ function updateHUD() {
   $('btnSim').classList.toggle('hidden', mode !== 'build');
   $('btnStop').classList.toggle('hidden', mode !== 'sim');
   document.querySelectorAll('#palette .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
-  canvas.style.cursor = tool === 'pan' ? 'grab' : tool === 'erase' ? 'not-allowed' : tool === 'move' ? 'move' : 'crosshair';
+  canvas.style.cursor = tool === 'erase' ? 'not-allowed' : tool === 'move' ? 'move' : 'crosshair';
   document.querySelectorAll('#materials .mat').forEach(b => b.classList.toggle('active', b.dataset.mat === curMat));
   document.querySelectorAll('#cars .car').forEach(b => b.classList.toggle('active', b.dataset.car === carType));
 }
@@ -1601,13 +1616,9 @@ canvas.addEventListener('pointerdown', e => {
     mouse.down = false; mouse.rdown = false; mouse.startNode = null; mouse.dragNode = null; panning = false;
     return;
   }
+  if (tool === 'pan') setTool('build'); // 팬 도구 제거됨 — 위치는 슬라이더로
   if (e.button === 1) { // 가운데 버튼 팬
     e.preventDefault(); panning = true; lastPX = p.sx; lastPY = p.sy;
-    mouse.down = false; mouse.startNode = null; mouse.dragNode = null;
-    return;
-  }
-  if (tool === 'pan') { // 팬 도구
-    panning = true; lastPX = p.sx; lastPY = p.sy;
     mouse.down = false; mouse.startNode = null; mouse.dragNode = null;
     return;
   }
@@ -1832,7 +1843,6 @@ window.addEventListener('keydown', e => {
   else if (k === 'b') setTool('build');
   else if (k === 'e') setTool('erase');
   else if (k === 'm') setTool('move');
-  else if (k === 'v') setTool('pan');
   else if (k === 'd' && mode === 'sim' && !car) spawnCar();
   else if (k === 'h') toggleHyd();
   else if (k === 'g') { showGrid = !showGrid; $('gridToggle').checked = showGrid; }
@@ -1900,6 +1910,8 @@ function bindUI() {
   $('zoomOut').onclick = () => zoomAt(view.cw / 2, view.ch / 2, 1 / 1.25);
   $('zoomFit').onclick = () => fitCamera();
   $('zoomSlider').oninput = e => { cam.z = +e.target.value / 100; clampCam(); updateZoomUI(); };
+  $('panX').oninput = () => panSliderTo();
+  $('panY').oninput = () => panSliderTo();
   $('btnUndo').onclick = doUndo; $('btnRedo').onclick = doRedo;
   $('btnClear').onclick = () => {
     if (mode !== 'build' || !confirm('앵커를 제외한 다리를 모두 지울까요?')) return;

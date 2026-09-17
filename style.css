@@ -8,13 +8,16 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
   font-family:'Pretendard','Apple SD Gothic Neo',system-ui,sans-serif;overflow:hidden}
 #app{position:fixed;inset:0}
 #game{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}
-#zoomctl{position:absolute;right:10px;bottom:52px;display:flex;gap:6px;align-items:center;
-  background:var(--panel);border:1px solid var(--line);border-radius:99px;padding:6px 10px;
+#zoomctl{position:absolute;right:10px;bottom:52px;display:flex;flex-direction:column;gap:6px;
+  background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:8px 10px;
   backdrop-filter:blur(10px);z-index:10}
+.zc-row{display:flex;gap:6px;align-items:center}
+.zc-ico{font-size:12px;color:var(--dim);width:16px;text-align:center}
 #zoomctl button{background:#222c42;color:#fff;border:1px solid var(--line);
   border-radius:8px;padding:5px 10px;cursor:pointer;font-size:14px}
 #zoomctl button:hover{background:#33405e}
 #zoomSlider{width:110px;accent-color:var(--acc)}
+#panX,#panY{width:92px;accent-color:var(--steel)}
 #zoomLabel{font-size:12px;color:var(--dim);min-width:42px;text-align:right;font-variant-numeric:tabular-nums}
 
 #topbar{position:absolute;top:10px;left:50%;transform:translateX(-50%);
