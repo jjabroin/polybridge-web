@@ -446,7 +446,10 @@ function spreadLoad(x, y, F, roadOnly) {
   found.sort((p, q) => q.w - p.w);
   found = found.slice(0, 3);
   const tot = found.reduce((s, e) => s + e.w, 0) || 1;
-  for (const e of found) pushBeamForce(e.b, e.t, F * e.w / tot);
+  for (const e of found) {
+    pushBeamForce(e.b, e.t, F * e.w / tot);
+    e.b.load = (e.b.load || 0) + F * e.w / tot; // 휨모멘트용 횡하중 누적
+  }
 }
 function pushBeamForce(beam, t, fy) {
   if (!beam || beam.broken) return;
@@ -458,9 +461,9 @@ function pushBeamForce(beam, t, fy) {
 // ---------- 물리 스텝 ----------
 function physStep(dt) {
   simTime += dt;
+  for (const b of beams) b.load = 0; // 횡하중 누적 초기화 (휨모멘트용)
   // 1) 노드 적분 (Verlet)
-  for (const n of nodes) {
-    if (n.fixed) { n.px = n.x; n.py = n.y; continue; }
+  for (const n of nodes) {    if (n.fixed) { n.px = n.x; n.py = n.y; continue; }
     const vx = (n.x - n.px) * 0.99, vy = (n.y - n.py) * 0.99;
     n.px = n.x; n.py = n.y;
     n.x += vx + (n.fx / n.mass) * dt * dt;
@@ -511,6 +514,14 @@ function physStep(dt) {
     if (a > mx) mx = a;
     if (strain > M.breakT * bonus || strain < M.breakC * bonus) {
       breakBeam(b);
+      continue;
+    }
+    // 휨모멘트 파단 (보 이론 M∝wL²): 긴 도로는 짧은 구간으로 나누거나 받쳐야 한다.
+    // 40px+경차 ≈ 0.8M / 80px+경차 ≈ 4.8M / 120px+경차 ≈ 14M → 한계 12M
+    if (b.mat === 'road') {
+      const wTrans = (b.load || 0) + M.wpp * b.rest * GRAV;
+      const moment = wTrans * b.rest * b.rest / 8;
+      if (moment > 12e6 * bonus) { breakBeam(b); continue; }
     }
   }
   if (mx > maxStrainSeen) maxStrainSeen = mx;
