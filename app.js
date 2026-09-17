@@ -236,7 +236,17 @@ function weldNodes(tol) {
   }
 }
 function beamExists(a, b, mat) { return beams.some(x => ((x.a === a && x.b === b) || (x.a === b && x.b === a)) && (!mat || x.mat === mat)); }
-// 보강도로 (원작 원칙): 같은 구간에 겹친 목재/철강이 있으면 도로 강도 상승 (목재 +33% / 철강 +67%)
+// 도로 받침 판정: 트러스(비도로 부재)와 공유 노드가 있거나 끝점이 고정이면 받침 있음.
+// 받침 있는 도로는 휨·처짐으로 안 끊어짐 — 밑의 목재·철강이 먼저 끊기고 나서야 따라 끊김 (원작 원칙).
+function roadSupported(b) {
+  if (b.a.fixed || b.a.anchor || b.b.fixed || b.b.anchor) return true;
+  for (const x of beams) {
+    if (x.broken || x === b) continue;
+    if (x.mat === 'road' || x.mat === 'rroad' || x.mat === 'cable' || x.mat === 'rope') continue;
+    if (x.a === b.a || x.b === b.a || x.a === b.b || x.b === b.b) return true;
+  }
+  return false;
+}
 function reinfOf(b) {
   if (b.mat !== 'road' || b.broken) return 1;
   let wood = false;
@@ -560,7 +570,8 @@ function physStep(dt) {
     // 휨모멘트 파단 (보 이론 M∝wL²): 긴 도로는 짧은 구간으로 나누거나 받쳐야 한다.
     // 40px+경차 ≈ 0.8M / 80px+경차 ≈ 4.8M / 120px+경차 ≈ 14M → 한계 12M (강화도로 1.67배)
     // 점진 누적이라 휨이 먼저 보이고 나서 부러짐 (팡 아님).
-    if (b.mat === 'road' || b.mat === 'rroad') {
+    // 단, 받침 있는 도로는 면제 (밑 구조가 먼저 끊김 — 도로 단독 파단 금지).
+    if ((b.mat === 'road' || b.mat === 'rroad') && !roadSupported(b)) {
       const wTrans = (b.load || 0) + M.wpp * b.rest * GRAV;
       const moment = wTrans * b.rest * b.rest / 8;
       const cap = 12e6 * (b.mat === 'rroad' ? 1.67 : bonus);
@@ -579,7 +590,8 @@ function physStep(dt) {
   const sagLim = (LV().right - LV().left) / 20;
   for (const n of nodes) {
     if (n.fixed || n.anchor || n.y0 === undefined) continue;
-    const rb = beams.filter(b => !b.broken && (b.mat === 'road' || b.mat === 'rroad') && (b.a === n || b.b === n));
+    // 받침 없는 도로만 대상 (받침 있으면 밑 구조가 먼저 — 도로 단독 파단 금지)
+    const rb = beams.filter(b => !b.broken && (b.mat === 'road' || b.mat === 'rroad') && (b.a === n || b.b === n) && !roadSupported(b));
     if (!rb.length) continue;
     const loaded = rb.some(b => Math.abs(b.strain) > 0.01);
     const sag = n.y - n.y0;
