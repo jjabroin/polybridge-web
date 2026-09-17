@@ -23,16 +23,21 @@ let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
 //  무게: steel > road > wood > cable | 길이: road=wood(짧음) < steel(김) < cable(무제한급)
 //  buckLen: 이 길이 초과 압축재는 오일러 좌굴로 한계 저하 (한계 ∝ 1/L²)
 //  yieldR: 항복비 — 초과 시 영구 변형(소성). 콘크리트 취성(0.95) / 목재(0.7) / 강재 연성(0.5)
+//  tensionOnly: 인장 전용 (로프·케이블 — 압축엔 힘 0, 축 늘어짐)
+//  자재 원천 (Reddit r/PolyBridge 실측 인장pg비 + 공식 매뉴얼): wood 20.4 / road 22.9 / spring 24.5 /
+//    rope 30.6 / rroad 38.2 / steel·유압(비작동) 51 / cable 56 / 유압(작동) 254.8
+//  ※ 기존 4종 한계는 검증된 밸런스 유지, 신규 자재는 역할(저가 인장/유연/피스톤)으로 배치
 const MATERIALS = {
   road:  { name: '도로', en: 'ROAD',   cost: 3.3, breakT: 0.20, breakC: -0.13, stiff: 1.0,  wpp: 0.030, maxLen: 120, minLen: 15, thick: 11, color: '#3a3f4a', key: '1', collideCar: true, buckLen: 60, yieldR: 0.95 },
   wood:  { name: '목재', en: 'WOOD',   cost: 3.0, breakT: 0.024, breakC: -0.020, stiff: 0.8,  wpp: 0.016, maxLen: 120, minLen: 15, thick: 7,  color: '#b07a45', key: '2', collideCar: false, buckLen: 80, yieldR: 0.7 },
   steel: { name: '철강', en: 'STEEL',  cost: 7.5, breakT: 0.40, breakC: -0.26, stiff: 1.0,  wpp: 0.045, maxLen: 190, minLen: 15, thick: 8,  color: '#5aa9ff', key: '3', collideCar: false, buckLen: 110, yieldR: 0.5 },
-  cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true, buckLen: 0, yieldR: 0.8 },
+  cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true, tensionOnly: true, buckLen: 0, yieldR: 0.8 },
+  rope:  { name: '로프', en: 'ROPE',   cost: 3.7, breakT: 0.06, breakC: -1e9, stiff: 0.5,  wpp: 0.004, maxLen: 350, minLen: 15, thick: 2,  color: '#a1887f', key: '5', collideCar: false, noCollide: true, tensionOnly: true, buckLen: 0, yieldR: 0.8 },
+  rroad: { name: '강화도로', en: 'ROAD+', cost: 5.5, breakT: 0.33, breakC: -0.20, stiff: 1.0,  wpp: 0.038, maxLen: 120, minLen: 15, thick: 12, color: '#41454f', key: '6', collideCar: true, buckLen: 60, yieldR: 0.9 },
+  spring:{ name: '스프링', en: 'SPRING', cost: 4.5, breakT: 0.30, breakC: -0.30, stiff: 0.15, wpp: 0.010, maxLen: 200, minLen: 15, thick: 4,  color: '#9ccc65', key: '7', collideCar: false, buckLen: 0, yieldR: 0.9 },
+  hyd:   { name: '유압', en: 'HYD',     cost: 12.5, breakT: 0.30, breakC: -0.18, stiff: 1.0,  wpp: 0.050, maxLen: 190, minLen: 15, thick: 9,  color: '#ff8f00', key: '8', collideCar: false, buckLen: 70, yieldR: 0.85 },
 };
-//  충돌: 차량은 ROAD하고만 충돌 (원작 원칙). cable은 어떤 강체와도 충돌하지 않는 순수 인장재.
-//  구조 매핑: 거더교=road+하부보강 / 트러스교(Warren·Pratt)=wood·steel 삼각형 /
-//            아치교=steel 압축아치 / 현수교=cable+타워 / 사장교=타워+방사형cable
-const MAT_ORDER = ['road', 'wood', 'steel', 'cable'];
+const MAT_ORDER = ['road', 'wood', 'steel', 'cable', 'rope', 'rroad', 'spring', 'hyd'];
 
 // ---------- 차량 ----------
 // 설계 원천: Matter.js 공식 car 예제(MIT)의 검증된 치수 원리를 우리 서스펜션 방식에 이식.
@@ -92,6 +97,8 @@ let undoStack = [], redoStack = [];
 let mouse = { sx: 0, sy: 0, wx: 0, wy: 0, down: false, rdown: false, startNode: null, cur: null, hoverBeam: null, dragNode: null, moved: false };
 let loseTimer = 0, stuckTimer = 0, flipTimer = 0, goalTimer = 0;
 let stuckX = 0, stuckT = 0;
+let debris = [];       // 파단 잔해 (시뮬 전용)
+let hydPhase = 1.0;    // 유압 위상 (1.0 중립 ↔ 1.3 신장 / 0.7 수축)
 let simOverBudget = false;
 let flagWave = 0;
 
@@ -464,6 +471,15 @@ function pushBeamForce(beam, t, fy) {
 function physStep(dt) {
   simTime += dt;
   for (const b of beams) b.load = 0; // 횡하중 누적 초기화 (휨모멘트용)
+  // 유압 작동: 목표 길이로 애니메이션 (원작 ±50% 위상)
+  if (hydPhase !== 1.0) {
+    for (const b of beams) {
+      if (b.mat !== 'hyd' || b.broken || !b.rest0) continue;
+      const tgt = b.rest0 * hydPhase;
+      const dd = tgt - b.rest, step = 90 * dt * Math.sign(dd);
+      b.rest = Math.abs(step) >= Math.abs(dd) ? tgt : b.rest + step;
+    }
+  }
   // 1) 노드 적분 (Verlet)
   for (const n of nodes) {    if (n.fixed) { n.px = n.x; n.py = n.y; continue; }
     const vx = (n.x - n.px) * 0.99, vy = (n.y - n.py) * 0.99;
@@ -483,8 +499,8 @@ function physStep(dt) {
       const M = MATERIALS[b.mat];
       let dx = b.b.x - b.a.x, dy = b.b.y - b.a.y;
       const d = Math.hypot(dx, dy) || 1e-6;
-      if (b.mat === 'cable' && d <= b.rest) continue;   // 케이블은 늘어남만 저항
-      const diff = (d - b.rest) / d * M.stiff;
+      if (M.tensionOnly && d <= b.rest) continue;   // 인장 전용 (로프·케이블은 늘어남만 저항)
+      const diff = (d - b.rest) / d * M.stiff * (1 - 0.65 * (b.dmg || 0));
       const wa = b.a.fixed ? 0 : 1 / b.a.mass, wb = b.b.fixed ? 0 : 1 / b.b.mass;
       const tot = wa + wb; if (!tot) continue;
       const ox = dx * diff, oy = dy * diff;
@@ -515,9 +531,15 @@ function physStep(dt) {
     const { limT, limC } = beamLimits(b, strain);
     const a = Math.abs(strain);
     if (a > mx) mx = a;
-    if (strain > limT || strain < limC) {
-      breakBeam(b);
-      continue;
+    // 점진 파괴 (무너짐): 항복 초과분이 데미지로 누적 → 강성 저하 → 파단. 극한만 즉시 파단.
+    const ylim = Math.abs(strain > 0 ? limT : limC);
+    const over = (a - ylim * M.yieldR) / ylim;
+    if (a > ylim * 2.5) {
+      breakBeam(b, 'snap'); continue;
+    }
+    if (over > 0) {
+      b.dmg = Math.min(1.2, (b.dmg || 0) + over * over * 6 * dt);
+      if (b.dmg >= 1) { breakBeam(b, 'fatigue'); continue; }
     }
     // 소성 (영구 변형): 항복 초과분만큼 rest가 영구히 변함 — 붕괴 전 징조(처짐)로 보임.
     // rest가 늘면 변형률이 완화되어 자기 제한됨 (진행하면 파단, 버티면 안정화).
@@ -536,30 +558,45 @@ function physStep(dt) {
       }
     }
     // 휨모멘트 파단 (보 이론 M∝wL²): 긴 도로는 짧은 구간으로 나누거나 받쳐야 한다.
-    // 40px+경차 ≈ 0.8M / 80px+경차 ≈ 4.8M / 120px+경차 ≈ 14M → 한계 12M
-    if (b.mat === 'road') {
+    // 40px+경차 ≈ 0.8M / 80px+경차 ≈ 4.8M / 120px+경차 ≈ 14M → 한계 12M (강화도로 1.67배)
+    // 점진 누적이라 휨이 먼저 보이고 나서 부러짐 (팡 아님).
+    if (b.mat === 'road' || b.mat === 'rroad') {
       const wTrans = (b.load || 0) + M.wpp * b.rest * GRAV;
       const moment = wTrans * b.rest * b.rest / 8;
-      if (moment > 12e6 * bonus) { breakBeam(b); continue; }
+      const cap = 12e6 * (b.mat === 'rroad' ? 1.67 : bonus);
+      const rel = moment / cap - 1;
+      if (rel > 2) { breakBeam(b, 'snap'); continue; }
+      if (rel > 0) {
+        b.dmg = Math.min(1.2, (b.dmg || 0) + rel * rel * 30 * dt);
+        if (b.dmg >= 1) { breakBeam(b, 'fatigue'); continue; }
+      }
     }
   }
   if (mx > maxStrainSeen) maxStrainSeen = mx;
   // 도로 처짐 파단 (보 공학 원칙): 받침 없는 데크는 해먹처럼 주저앉으며 파괴.
   // 국소 꺾임이 아니라 '건설 위치 대비 처짐'으로 판단 — 정상 트러스의 탄성 처짐과 맨도로 붕괴를 구분.
-  // 한계는 경간의 5% (긴 레벨일수록 허용 처짐 증가).
+  // 한계는 경간의 5% (긴 레벨일수록 허용 처짐 증가). 점진 누적이라 처지다가 끊어짐.
   const sagLim = (LV().right - LV().left) / 20;
   for (const n of nodes) {
     if (n.fixed || n.anchor || n.y0 === undefined) continue;
-    const rb = beams.filter(b => !b.broken && b.mat === 'road' && (b.a === n || b.b === n));
+    const rb = beams.filter(b => !b.broken && (b.mat === 'road' || b.mat === 'rroad') && (b.a === n || b.b === n));
     if (!rb.length) continue;
     const loaded = rb.some(b => Math.abs(b.strain) > 0.01);
-    if (loaded && (n.y - n.y0) > sagLim) {
+    const sag = n.y - n.y0;
+    if (loaded && sag > sagLim * 2) {
       let victim = rb[0];
       for (const b of rb) if (Math.abs(b.strain) > Math.abs(victim.strain)) victim = b;
-      breakBeam(victim);
+      breakBeam(victim, 'snap');
+    } else if (loaded && sag > sagLim) {
+      let victim = rb[0];
+      for (const b of rb) if (Math.abs(b.strain) > Math.abs(victim.strain)) victim = b;
+      const rel = sag / sagLim - 1;
+      victim.dmg = Math.min(1.2, (victim.dmg || 0) + rel * rel * 8 * dt);
+      if (victim.dmg >= 1) breakBeam(victim, 'fatigue');
     }
   }
   if (car) checkCarOutcome(dt);
+  stepDebris(dt);
   // 물 입자/파티클
   updateParticles(dt);
   // 물 감쇠 (노드)
@@ -805,13 +842,61 @@ function beamLimits(b, strain) {
   }
   return { limT, limC };
 }
-function breakBeam(b) {
+function breakBeam(b, cause) {
   if (b.broken) return;
   b.broken = true; b.strain = 0; brokenCount++;
-  burst((b.a.x + b.b.x) / 2, (b.a.y + b.b.y) / 2, MATERIALS[b.mat].color, b.mat === 'road' ? 22 : 14);
-  shake = Math.min(14, shake + 5);
+  spawnDebris(b);
+  burst((b.a.x + b.b.x) / 2, (b.a.y + b.b.y) / 2, MATERIALS[b.mat].color,
+    (b.mat === 'road' || b.mat === 'rroad' ? 4 : 0) + (cause === 'snap' ? 18 : 10));
+  shake = Math.min(14, shake + (cause === 'snap' ? 5 : 3));
   breakFlash = 0.45;
   sndBreak();
+}
+// 파단 잔해: 끊어진 빔의 양쪽 반토막이 각 노드에 매달려 흔들림 + 무게로 연쇄 붕괴 유발
+function spawnDebris(b) {
+  if (debris.length > 60) debris.splice(0, debris.length - 60);
+  const mx = (b.a.x + b.b.x) / 2, my = (b.a.y + b.b.y) / 2;
+  for (const N of [b.a, b.b]) {
+    const dx = mx - N.x, dy = my - N.y, dd = Math.hypot(dx, dy) || 1;
+    const L = Math.max(4, dd / 2), ux = dx / dd, uy = dy / dd;
+    const mkP = (k) => ({ x: N.x + ux * L * k, y: N.y + uy * L * k, px: N.x + ux * L * k, py: N.y + uy * L * k });
+    debris.push({
+      pin: N, p1: mkP(1), p2: mkP(2), l1: L, l2: L, mat: b.mat,
+      m: MATERIALS[b.mat].wpp * b.rest * 0.25,
+    });
+  }
+}
+function stepDebris(dt) {
+  const L = LV();
+  for (const d of debris) {
+    for (const p of [d.p1, d.p2]) {
+      const vx = (p.x - p.px) * 0.99, vy = (p.y - p.py) * 0.99;
+      p.px = p.x; p.py = p.y; p.x += vx; p.y += vy + GRAV * dt * dt;
+      if (p.y > L.waterY) { p.px = (p.px + p.x) / 2; p.py = (p.py + p.y) / 2; }
+    }
+    for (let k = 0; k < 4; k++) {
+      for (const [A, Bp, Ll, pin] of [[d.pin, d.p1, d.l1, true], [d.p1, d.p2, d.l2, false]]) {
+        const ddx = Bp.x - A.x, ddy = Bp.y - A.y;
+        const dist = Math.hypot(ddx, ddy) || 1e-6;
+        const diff = (dist - Ll) / dist;
+        if (pin) { Bp.x -= ddx * diff; Bp.y -= ddy * diff; }
+        else { const ox = ddx * diff * 0.5, oy = ddy * diff * 0.5; A.x += ox; A.y += oy; Bp.x -= ox; Bp.y -= oy; }
+      }
+    }
+    if (!d.pin.fixed) d.pin.fy += d.m * GRAV;
+  }
+}
+function drawDebris() {
+  ctx.lineCap = 'round';
+  for (const d of debris) {
+    const M = MATERIALS[d.mat] || MATERIALS.wood;
+    ctx.strokeStyle = 'rgba(0,0,0,.45)';
+    ctx.lineWidth = M.thick * 0.8 + 2;
+    ctx.beginPath(); ctx.moveTo(d.pin.x, d.pin.y); ctx.lineTo(d.p1.x, d.p1.y); ctx.lineTo(d.p2.x, d.p2.y); ctx.stroke();
+    ctx.strokeStyle = M.color;
+    ctx.lineWidth = M.thick * 0.8;
+    ctx.beginPath(); ctx.moveTo(d.pin.x, d.pin.y); ctx.lineTo(d.p1.x, d.p1.y); ctx.lineTo(d.p2.x, d.p2.y); ctx.stroke();
+  }
 }
 function burst(x, y, color, n) {
   for (let i = 0; i < n; i++) {
@@ -858,7 +943,7 @@ function render() {
 
   drawSky(); drawTerrain(L); drawWater(L);
   if (mode === 'build' && showGrid) drawGrid();
-  drawAnchors(); drawBeams(); drawNodes(); drawBodies(); drawCar(); drawFlag(L);
+  drawAnchors(); drawBeams(); drawDebris(); drawNodes(); drawBodies(); drawCar(); drawFlag(L);
   drawParticles(); drawPreview();
   ctx.restore();
   shake *= 0.88; if (shake < 0.2) shake = 0;
@@ -998,6 +1083,17 @@ function stressColor(mat, strain, boost) {
   const tr = s > 0 ? 244 : 30, tg = s > 0 ? 67 : 120, tb = s > 0 ? 54 : 255;
   return `rgb(${Math.round(lerp(br, tr, k))},${Math.round(lerp(bg, tg, k))},${Math.round(lerp(bb, tb, k))})`;
 }
+// 유압 위상 토글 (원작 Hydraulic Controller 간소판: 전체 동시 신장/수축)
+function toggleHyd() {
+  if (mode !== 'sim') return;
+  hydPhase = hydPhase === 1.5 ? 0.5 : 1.5;
+  updateHydUI(); sndClick();
+  toast(hydPhase === 1.5 ? '🔧 유압 신장! (+50%)' : '🔧 유압 수축! (−50%)');
+}
+function updateHydUI() {
+  const el = $('hydState');
+  if (el) el.textContent = hydPhase === 1.0 ? '중립' : hydPhase > 1 ? '신장' : '수축';
+}
 function drawBeams() {
   ctx.lineCap = 'round';
   for (const b of beams) {
@@ -1032,9 +1128,56 @@ function drawBeams() {
       ctx.strokeStyle = 'rgba(255,213,79,.85)'; ctx.lineWidth = 2; ctx.setLineDash([10, 8]);
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
       ctx.setLineDash([]);
-    } else if (b.mat === 'cable') {
+    } else if (b.mat === 'cable' || b.mat === 'rope') {
       ctx.strokeStyle = beamColor(b); ctx.lineWidth = M.thick;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+    } else if (b.mat === 'spring') {
+      // 스프링 코일 (원작: 하중에 따라 늘었다 줄었다)
+      const dx = b.b.x - b.a.x, dy = b.b.y - b.a.y, d = Math.hypot(dx, dy) || 1;
+      const nx = -dy / d, ny = dx / d, coils = 6, amp = 5;
+      ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = M.thick + 2;
+      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+      ctx.strokeStyle = beamColor(b); ctx.lineWidth = M.thick;
+      ctx.beginPath();
+      for (let i = 0; i <= coils * 2; i++) {
+        const t = i / (coils * 2), off = (i % 2 === 0) ? 0 : amp;
+        const px = b.a.x + dx * t + nx * off, py = b.a.y + dy * t + ny * off;
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    } else if (b.mat === 'hyd') {
+      // 유압 피스톤: 실린더 + 로드
+      const dx = b.b.x - b.a.x, dy = b.b.y - b.a.y;
+      const mx = b.a.x + dx * 0.62, my = b.a.y + dy * 0.62;
+      ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = M.thick + 3;
+      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+      ctx.strokeStyle = '#b25c00'; ctx.lineWidth = M.thick;
+      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(mx, my); ctx.stroke();
+      ctx.strokeStyle = '#eceff1'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+      ctx.fillStyle = beamColor(b);
+      ctx.beginPath(); ctx.arc(mx, my, 5, 0, 7); ctx.fill();
+    } else if (b.mat === 'rroad') {
+      // 강화도로: 두꺼운 노면에 주황 보강 테두리 + 이중 중앙선
+      ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = M.thick + 3;
+      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+      ctx.strokeStyle = beamColor(b); ctx.lineWidth = M.thick;
+      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
+      const rdx = b.b.x - b.a.x, rdy = b.b.y - b.a.y, rd = Math.hypot(rdx, rdy) || 1;
+      const rnx = -rdy / rd * (M.thick / 2 - 1), rny = rdx / rd * (M.thick / 2 - 1);
+      ctx.strokeStyle = '#ff8f00'; ctx.lineWidth = 2.5;
+      for (const sgn of [1, -1]) {
+        ctx.beginPath();
+        ctx.moveTo(b.a.x + rnx * sgn, b.a.y + rny * sgn);
+        ctx.lineTo(b.b.x + rnx * sgn, b.b.y + rny * sgn);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = 'rgba(255,213,79,.9)'; ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      ctx.moveTo(b.a.x + rnx * 0.25, b.a.y + rny * 0.25); ctx.lineTo(b.b.x + rnx * 0.25, b.b.y + rny * 0.25);
+      ctx.moveTo(b.a.x - rnx * 0.25, b.a.y - rny * 0.25); ctx.lineTo(b.b.x - rnx * 0.25, b.b.y - rny * 0.25);
+      ctx.stroke();
+      ctx.setLineDash([]);
     } else {
       ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = M.thick + 2;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
@@ -1247,7 +1390,8 @@ function enterSim() {
   mode = 'sim'; result = null; simTime = 0; dispatched = false;
   maxStrainSeen = 0; brokenCount = 0; bodies = []; car = null; particles = [];
   for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; n.y0 = n.y; }
-  for (const b of beams) { b.broken = false; b.strain = 0; b.rest0 = b.rest; b.yielded = false; }
+  for (const b of beams) { b.broken = false; b.strain = 0; b.rest0 = b.rest; b.yielded = false; b.dmg = 0; }
+  debris = []; hydPhase = 1.0; updateHydUI();
   for (const b of beams) { b.broken = false; b.strain = 0; }
   refreshMasses();
   hideOverlay(); sndClick();
@@ -1257,7 +1401,7 @@ function enterSim() {
 }
 function exitSim() {
   if (mode === 'build') return;
-  mode = 'build'; car = null; bodies = []; particles = []; result = null;
+  mode = 'build'; car = null; bodies = []; particles = []; debris = []; result = null;
   if (buildSnap) deserialize(buildSnap);
   hideOverlay(); sndClick();
   $('hint').textContent = defaultHint();
@@ -1276,7 +1420,7 @@ function setLevel(i, keepBridge) {
   sel.value = String(levelIndex);
   carType = LV().car;
   undoStack = []; redoStack = [];
-  mode = 'build'; car = null; bodies = []; particles = []; result = null; buildSnap = null;
+  mode = 'build'; car = null; bodies = []; particles = []; debris = []; result = null; buildSnap = null;
   hideOverlay();
   const saved = keepBridge ? localStorage.getItem(saveKey()) : null;
   if (saved) { try { deserialize(saved); } catch (e) { defaultBridge(); } }
@@ -1448,11 +1592,12 @@ window.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && k === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); return; }
   if ((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); doRedo(); return; }
   if (k === ' ') { e.preventDefault(); mode === 'build' ? enterSim() : exitSim(); }
-  else if (k === '1' || k === '2' || k === '3' || k === '4') setMat(MAT_ORDER[+k - 1]);
+  else if (k >= '1' && k <= '8' && +k <= MAT_ORDER.length) setMat(MAT_ORDER[+k - 1]);
   else if (k === 'b') setTool('build');
   else if (k === 'e') setTool('erase');
   else if (k === 'm') setTool('move');
   else if (k === 'd' && mode === 'sim' && !car) spawnCar();
+  else if (k === 'h') toggleHyd();
   else if (k === 'g') { showGrid = !showGrid; $('gridToggle').checked = showGrid; }
   else if (k === 'escape') { $('help').classList.add('hidden'); if (mode === 'sim') exitSim(); }
 });
@@ -1513,6 +1658,7 @@ function bindUI() {
   $('btnDrive').onclick = () => { if (mode !== 'sim') enterSim(); if (mode === 'sim' && !car) spawnCar(); };
   $('btnBall').onclick = () => { if (mode !== 'sim') enterSim(); if (mode === 'sim') spawnBall(); };
   $('btnCrate').onclick = () => { if (mode !== 'sim') enterSim(); if (mode === 'sim') spawnCrate(); };
+  $('btnHyd').onclick = () => toggleHyd();
   $('btnUndo').onclick = doUndo; $('btnRedo').onclick = doRedo;
   $('btnClear').onclick = () => {
     if (mode !== 'build' || !confirm('앵커를 제외한 다리를 모두 지울까요?')) return;
@@ -1583,8 +1729,8 @@ function frame(now) {
         if (b.broken) continue;
         const M = MATERIALS[b.mat];
         const dx = b.b.x - b.a.x, dy = b.b.y - b.a.y, d = Math.hypot(dx, dy) || 1e-6;
-        if (b.mat === 'cable' && d <= b.rest) continue;
-        const diff = (d - b.rest) / d * M.stiff;
+        if (M.tensionOnly && d <= b.rest) continue;
+        const diff = (d - b.rest) / d * M.stiff * (1 - 0.65 * (b.dmg || 0));
         const wa = b.a.fixed ? 0 : 1, wb = b.b.fixed ? 0 : 1, t = wa + wb;
         if (!t) continue;
         b.a.x += dx * diff * wa / t; b.a.y += dy * diff * wa / t;

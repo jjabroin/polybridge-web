@@ -38,6 +38,7 @@ aside{position:absolute;top:76px;background:var(--panel);border:1px solid var(--
 #palette{left:10px}#testpanel{right:10px}
 aside h3{margin:6px 0 8px;font-size:13px;color:var(--dim);font-weight:700}
 aside h3 small{font-weight:400;opacity:.7}
+#materials{max-height:44vh;overflow-y:auto;padding-right:2px}
 .mat{display:flex;gap:8px;align-items:center;width:100%;text-align:left;
   background:#1b2440;color:#fff;border:2px solid transparent;border-radius:10px;
   padding:8px;margin-bottom:6px;cursor:pointer}
