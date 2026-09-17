@@ -16,7 +16,34 @@ const BARREL_FRAC = 0.62; // 유압 칼라(러그점) 위치 — 몸통 쪽 고�
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-let DPR = 1, view = { s: 1, ox: 0, oy: 0 };
+let DPR = 1;
+// 카메라: view = 화면 맞춤 기준, cam = 중심/배율 (줌아웃 전체보기 ↔ 줌인 정밀 작업)
+let view = { s: 1, cw: 1280, ch: 720 };
+let cam = { cx: W / 2, cy: H / 2, z: 1 };
+function fitCamera() { cam.cx = W / 2; cam.cy = H / 2; cam.z = 1; clampCam(); updateZoomUI(); }
+function clampCam() {
+  cam.z = clamp(cam.z, 0.45, 3);
+  const vw = view.cw / (view.s * cam.z), vh = view.ch / (view.s * cam.z);
+  const mx = Math.max(200, (W - vw) / 2 + 200), my = Math.max(150, (H - vh) / 2 + 150);
+  cam.cx = clamp(cam.cx, W / 2 - mx, W / 2 + mx);
+  cam.cy = clamp(cam.cy, H / 2 - my, H / 2 + my);
+}
+function effS() { return view.s * cam.z; }
+function w2s(x, y) { const s = effS(); return [view.cw / 2 + (x - cam.cx) * s, view.ch / 2 + (y - cam.cy) * s]; }
+function s2w(sx, sy) { const s = effS(); return [cam.cx + (sx - view.cw / 2) / s, cam.cy + (sy - view.ch / 2) / s]; }
+function zoomAt(sx, sy, f) {
+  const [wx, wy] = s2w(sx, sy);
+  cam.z = clamp(cam.z * f, 0.45, 3);
+  const s = effS();
+  cam.cx = wx - (sx - view.cw / 2) / s;
+  cam.cy = wy - (sy - view.ch / 2) / s;
+  clampCam(); updateZoomUI();
+}
+function updateZoomUI() {
+  const sl = $('zoomSlider'), lb = $('zoomLabel');
+  if (sl) sl.value = Math.round(cam.z * 100);
+  if (lb) lb.textContent = Math.round(cam.z * 100) + '%';
+}
 
 // ---------- 자재 ----------
 // 원리 (Poly Bridge 공식 스펙에서 도출한 상대 비율 — wood=1 기준):
@@ -1005,10 +1032,9 @@ function resize() {
   canvas.height = Math.floor(canvas.clientHeight * DPR);
   const cw = canvas.clientWidth || window.innerWidth, ch = canvas.clientHeight || window.innerHeight;
   const s = Math.min(cw / W, ch / H);
-  view = { s, ox: (cw - W * s) / 2, oy: (ch - H * s) / 2 };
+  view = { s, cw, ch };
+  clampCam();
 }
-function w2s(x, y) { return [view.ox + x * view.s, view.oy + y * view.s]; }
-function s2w(sx, sy) { return [(sx - view.ox) / view.s, (sy - view.oy) / view.s]; }
 window.addEventListener('resize', resize);
 
 function render() {
@@ -1021,8 +1047,9 @@ function render() {
   ctx.fillStyle = g; ctx.fillRect(0, 0, cw, ch);
 
   ctx.save();
-  ctx.translate(view.ox, view.oy); ctx.scale(view.s, view.s);
-  if (shake > 0.2) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+  const es = effS();
+  ctx.translate(view.cw / 2, view.ch / 2); ctx.scale(es, es); ctx.translate(-cam.cx, -cam.cy);
+  if (shake > 0.2) ctx.translate((Math.random() - .5) * shake / es, (Math.random() - .5) * shake / es);
 
   drawSky(); drawTerrain(L); drawWater(L);
   if (mode === 'build' && showGrid) drawGrid();
@@ -1462,6 +1489,7 @@ function updateHUD() {
   $('btnSim').classList.toggle('hidden', mode !== 'build');
   $('btnStop').classList.toggle('hidden', mode !== 'sim');
   document.querySelectorAll('#palette .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  canvas.style.cursor = tool === 'pan' ? 'grab' : tool === 'erase' ? 'not-allowed' : tool === 'move' ? 'move' : 'crosshair';
   document.querySelectorAll('#materials .mat').forEach(b => b.classList.toggle('active', b.dataset.mat === curMat));
   document.querySelectorAll('#cars .car').forEach(b => b.classList.toggle('active', b.dataset.car === carType));
 }
@@ -1525,6 +1553,7 @@ function setLevel(i, keepBridge) {
   if (saved) { try { deserialize(saved); } catch (e) { defaultBridge(); } }
   else if (!loadGame(true)) defaultBridge();
   refreshCarList();
+  fitCamera();
   updateHUD();
   toast('📍 ' + LV().name + ' — ' + LV().desc);
 }
@@ -1542,10 +1571,46 @@ function distToBeam(wx, wy, b) {
   return Math.hypot(wx - c.qx, wy - c.qy);
 }
 canvas.addEventListener('contextmenu', e => e.preventDefault());
+const pts = new Map(); // 활성 포인터 (핀치 줌용)
+let pinch0 = null, panning = false, lastPX = 0, lastPY = 0;
+function panBy(dsx, dsy) {
+  const s = effS();
+  cam.cx -= dsx / s; cam.cy -= dsy / s;
+  clampCam(); updateZoomUI();
+}
+function applyPinch() {
+  const arr = [...pts.values()];
+  if (arr.length < 2 || !pinch0 || pinch0.d < 5) return;
+  const d = Math.hypot(arr[0].sx - arr[1].sx, arr[0].sy - arr[1].sy);
+  const mx = (arr[0].sx + arr[1].sx) / 2, my = (arr[0].sy + arr[1].sy) / 2;
+  cam.cx = pinch0.cx; cam.cy = pinch0.cy; cam.z = pinch0.z;
+  zoomAt(pinch0.mx, pinch0.my, d / pinch0.d);
+  const s = effS();
+  cam.cx -= (mx - pinch0.mx) / s;
+  cam.cy -= (my - pinch0.my) / s;
+  clampCam(); updateZoomUI();
+}
 canvas.addEventListener('pointerdown', e => {
   audio();
   canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
   const p = evPos(e);
+  pts.set(e.pointerId, { sx: p.sx, sy: p.sy });
+  if (pts.size === 2) { // 핀치 시작 — 건설 제스처 취소
+    const arr = [...pts.values()];
+    pinch0 = { d: Math.hypot(arr[0].sx - arr[1].sx, arr[0].sy - arr[1].sy), mx: (arr[0].sx + arr[1].sx) / 2, my: (arr[0].sy + arr[1].sy) / 2, cx: cam.cx, cy: cam.cy, z: cam.z };
+    mouse.down = false; mouse.rdown = false; mouse.startNode = null; mouse.dragNode = null; panning = false;
+    return;
+  }
+  if (e.button === 1) { // 가운데 버튼 팬
+    e.preventDefault(); panning = true; lastPX = p.sx; lastPY = p.sy;
+    mouse.down = false; mouse.startNode = null; mouse.dragNode = null;
+    return;
+  }
+  if (tool === 'pan') { // 팬 도구
+    panning = true; lastPX = p.sx; lastPY = p.sy;
+    mouse.down = false; mouse.startNode = null; mouse.dragNode = null;
+    return;
+  }
   mouse.sx = p.sx; mouse.sy = p.sy; mouse.wx = p.wx; mouse.wy = p.wy;
   mouse.down = true; mouse.moved = false;
   if (e.button === 2) { // 우클릭 지우기
@@ -1568,6 +1633,14 @@ canvas.addEventListener('pointerdown', e => {
 });
 canvas.addEventListener('pointermove', e => {
   const p = evPos(e);
+  if (pts.has(e.pointerId)) pts.set(e.pointerId, { sx: p.sx, sy: p.sy });
+  if (pts.size >= 2) { applyPinch(); mouse.sx = p.sx; mouse.sy = p.sy; return; }
+  if (panning) {
+    panBy(p.sx - lastPX, p.sy - lastPY);
+    lastPX = p.sx; lastPY = p.sy;
+    mouse.sx = p.sx; mouse.sy = p.sy;
+    return;
+  }
   mouse.sx = p.sx; mouse.sy = p.sy;
   const dx = p.wx - mouse.wx, dy = p.wy - mouse.wy;
   if (Math.abs(dx) + Math.abs(dy) > 1) mouse.moved = true;
@@ -1586,6 +1659,9 @@ canvas.addEventListener('pointermove', e => {
   }
 });
 window.addEventListener('pointerup', e => {
+  pts.delete(e.pointerId);
+  if (pts.size < 2) pinch0 = null;
+  if (panning && pts.size === 0) panning = false;
   if (e.target !== canvas && e.type === 'pointerup') { /* 팔레트 클릭 등 */ }
   if (!mouse.down && !mouse.rdown) return;
   mouse.down = false; mouse.rdown = false;
@@ -1597,7 +1673,18 @@ window.addEventListener('pointerup', e => {
   if (mouse.dragNode) { weldNodes(); refreshMasses(); updateHUD(); autosaveSoon(); }
   mouse.startNode = null; mouse.dragNode = null;
 });
-// 노드 이동 + 연결 빔 길이 제한 검증 (초과 시 원위치 — 공짜 늘이기 방지)
+canvas.addEventListener('pointercancel', e => {
+  pts.delete(e.pointerId);
+  if (pts.size < 2) pinch0 = null;
+  if (pts.size === 0) panning = false;
+  mouse.down = false; mouse.rdown = false; mouse.startNode = null; mouse.dragNode = null;
+});
+canvas.addEventListener('mousedown', e => { if (e.button === 1) e.preventDefault(); });
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  zoomAt(e.clientX - r.left, e.clientY - r.top, Math.pow(1.0015, -e.deltaY));
+}, { passive: false });
 function tryMoveNode(dn, x, y) {
   const ox = dn.x, oy = dn.y;
   dn.x = x; dn.y = y;
@@ -1745,6 +1832,7 @@ window.addEventListener('keydown', e => {
   else if (k === 'b') setTool('build');
   else if (k === 'e') setTool('erase');
   else if (k === 'm') setTool('move');
+  else if (k === 'v') setTool('pan');
   else if (k === 'd' && mode === 'sim' && !car) spawnCar();
   else if (k === 'h') toggleHyd();
   else if (k === 'g') { showGrid = !showGrid; $('gridToggle').checked = showGrid; }
@@ -1808,6 +1896,10 @@ function bindUI() {
   $('btnBall').onclick = () => { if (mode !== 'sim') enterSim(); if (mode === 'sim') spawnBall(); };
   $('btnCrate').onclick = () => { if (mode !== 'sim') enterSim(); if (mode === 'sim') spawnCrate(); };
   $('btnHyd').onclick = () => toggleHyd();
+  $('zoomIn').onclick = () => zoomAt(view.cw / 2, view.ch / 2, 1.25);
+  $('zoomOut').onclick = () => zoomAt(view.cw / 2, view.ch / 2, 1 / 1.25);
+  $('zoomFit').onclick = () => fitCamera();
+  $('zoomSlider').oninput = e => { cam.z = +e.target.value / 100; clampCam(); updateZoomUI(); };
   $('btnUndo').onclick = doUndo; $('btnRedo').onclick = doRedo;
   $('btnClear').onclick = () => {
     if (mode !== 'build' || !confirm('앵커를 제외한 다리를 모두 지울까요?')) return;
