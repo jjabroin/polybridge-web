@@ -546,12 +546,14 @@ function physStep(dt) {
   if (mx > maxStrainSeen) maxStrainSeen = mx;
   // 도로 처짐 파단 (보 공학 원칙): 받침 없는 데크는 해먹처럼 주저앉으며 파괴.
   // 국소 꺾임이 아니라 '건설 위치 대비 처짐'으로 판단 — 정상 트러스의 탄성 처짐과 맨도로 붕괴를 구분.
+  // 한계는 경간의 5% (긴 레벨일수록 허용 처짐 증가).
+  const sagLim = (LV().right - LV().left) / 20;
   for (const n of nodes) {
     if (n.fixed || n.anchor || n.y0 === undefined) continue;
     const rb = beams.filter(b => !b.broken && b.mat === 'road' && (b.a === n || b.b === n));
     if (!rb.length) continue;
     const loaded = rb.some(b => Math.abs(b.strain) > 0.01);
-    if (loaded && (n.y - n.y0) > 20) {
+    if (loaded && (n.y - n.y0) > sagLim) {
       let victim = rb[0];
       for (const b of rb) if (Math.abs(b.strain) > Math.abs(victim.strain)) victim = b;
       breakBeam(victim);
@@ -1380,8 +1382,34 @@ function tryBuild(a, b) {
   // 새 노드가 기존 빔 위면 분할 → 구조 일체화
   if (freshA) splitBeamAt(na);
   if (freshB) splitBeamAt(nb);
-  if (beamExists(na, nb, curMat)) { refreshMasses(); updateHUD(); return; }
-  beams.push({ id: beamSeq++, a: na, b: nb, mat: curMat, rest: Math.hypot(na.x - nb.x, na.y - nb.y), broken: false, strain: 0 });
+  // 새 빔이 기존 중간 노드를 지나면 자동 분할 (조인트 병합 — 긴 도로도 중간 받침과 연결됨)
+  const M0 = MATERIALS[curMat];
+  const abx = nb.x - na.x, aby = nb.y - na.y;
+  const L2 = abx * abx + aby * aby || 1;
+  const pts = [];
+  for (const n of nodes) {
+    if (n === na || n === nb) continue;
+    const t = ((n.x - na.x) * abx + (n.y - na.y) * aby) / L2;
+    if (t < 0.03 || t > 0.97) continue;
+    const d = Math.hypot(n.x - (na.x + abx * t), n.y - (na.y + aby * t));
+    if (d > 6) continue;
+    pts.push({ n, t });
+  }
+  pts.sort((p, q) => p.t - q.t);
+  const chain = [na, ...pts.map(p => p.n), nb];
+  let okSplit = chain.length > 2;
+  if (okSplit) for (let i = 0; i < chain.length - 1; i++) {
+    if (Math.hypot(chain[i].x - chain[i + 1].x, chain[i].y - chain[i + 1].y) < M0.minLen - 0.5) { okSplit = false; break; }
+  }
+  if (okSplit) {
+    for (let i = 0; i < chain.length - 1; i++) {
+      if (!beamExists(chain[i], chain[i + 1], curMat))
+        beams.push({ id: beamSeq++, a: chain[i], b: chain[i + 1], mat: curMat, rest: Math.hypot(chain[i].x - chain[i + 1].x, chain[i].y - chain[i + 1].y), broken: false, strain: 0 });
+    }
+  } else {
+    if (beamExists(na, nb, curMat)) { refreshMasses(); updateHUD(); return; }
+    beams.push({ id: beamSeq++, a: na, b: nb, mat: curMat, rest: Math.hypot(na.x - nb.x, na.y - nb.y), broken: false, strain: 0 });
+  }
   weldNodes();
   refreshMasses(); updateHUD(); sndClick(); autosaveSoon();
 }
