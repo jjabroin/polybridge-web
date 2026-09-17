@@ -98,7 +98,8 @@ let mouse = { sx: 0, sy: 0, wx: 0, wy: 0, down: false, rdown: false, startNode: 
 let loseTimer = 0, stuckTimer = 0, flipTimer = 0, goalTimer = 0;
 let stuckX = 0, stuckT = 0;
 let debris = [];       // 파단 잔해 (시뮬 전용)
-let hydPhase = 1.0;    // 유압 위상 (1.0 중립 ↔ 1.3 신장 / 0.7 수축)
+let hydPhase = 1.0;    // 유압 위상 (1.0 중립 ↔ 1.5 신장 / 0.5 수축)
+let pistonAsm = [];    // 유압 강직 어셈블리 {A,M,B,f} — 중간점이 꺾이지 않게 직선 유지
 let simOverBudget = false;
 let simCost = 0; // 주행 시작 시점 비용 고정 (시뮬 중 기하학 변동에 흔들리지 않음)
 let flagWave = 0;
@@ -529,6 +530,23 @@ function physStep(dt) {
       const couple = (it === 0);
       if (car) collideCar(couple);
       for (const b of bodies) collideBody(b, couple);
+    }
+    // 피스톤 강직: 중간점을 양끝 직선상으로 복귀 (유압이 꺾여 나눠지지 않게).
+    // halves가 모두 온전할 때만 유지 (부러지면 잔해 물리 우선).
+    if (it % 3 === 0) {
+      for (const P of pistonAsm) {
+        if (P.M.fixed) continue;
+        let halves = 0;
+        for (const b of beams) {
+          if (b.broken || b.mat !== 'hyd') continue;
+          if ((b.a === P.A && b.b === P.M) || (b.a === P.M && b.b === P.A) ||
+              (b.a === P.M && b.b === P.B) || (b.a === P.B && b.b === P.M)) halves++;
+        }
+        if (halves < 2) continue;
+        const tx = P.A.x + (P.B.x - P.A.x) * P.f, ty = P.A.y + (P.B.y - P.A.y) * P.f;
+        P.M.x += (tx - P.M.x) * 0.25;
+        P.M.y += (ty - P.M.y) * 0.25;
+      }
     }
   }
   // 5) 파단 판정 + 변형률 기록
@@ -1169,8 +1187,20 @@ function drawBeams() {
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(mx, my); ctx.stroke();
       ctx.strokeStyle = '#eceff1'; ctx.lineWidth = 4;
       ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
-      ctx.fillStyle = beamColor(b);
-      ctx.beginPath(); ctx.arc(mx, my, 5, 0, 7); ctx.fill();
+      // 중간 조인트(다른 유압과 공유하는 끝점)에 주황 연결점 표시 — 여기에 부착!
+      for (const E of [b.a, b.b]) {
+        let shared = false;
+        for (const x of beams) {
+          if (x === b || x.broken || x.mat !== 'hyd') continue;
+          if (x.a === E || x.b === E) { shared = true; break; }
+        }
+        if (shared) {
+          ctx.fillStyle = '#ff8f00';
+          ctx.beginPath(); ctx.arc(E.x, E.y, 6.5, 0, 7); ctx.fill();
+          ctx.fillStyle = '#fff3e0';
+          ctx.beginPath(); ctx.arc(E.x, E.y, 2.5, 0, 7); ctx.fill();
+        }
+      }
     } else if (b.mat === 'rroad') {
       // 강화도로: 두꺼운 노면에 주황 보강 테두리 + 이중 중앙선
       ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = M.thick + 3;
@@ -1407,6 +1437,50 @@ function enterSim() {
   for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; n.y0 = n.y; }
   for (const b of beams) { b.broken = false; b.strain = 0; b.rest0 = b.rest; b.yielded = false; b.dmg = 0; }
   debris = []; hydPhase = 1.0; updateHydUI();
+  pistonAsm = [];
+  // 피스톤 어셈블리 구성: 중간점을 공유하는 2개 유압 반쪽이 일직선이면 강직 연결 (꺾임 방지).
+  // 저장 없이 매 시뮬 시작 시 형상에서 도출 (이미 꺾인 힌지는 제외).
+  for (let i = 0; i < beams.length; i++) {
+    for (let j = i + 1; j < beams.length; j++) {
+      const x = beams[i], y = beams[j];
+      if (x.mat !== 'hyd' || y.mat !== 'hyd') continue;
+      const shared = [x.a, x.b].find(n => n === y.a || n === y.b);
+      if (!shared || shared.fixed) continue;
+      const A = (x.a === shared) ? x.b : x.a;
+      const B = (y.a === shared) ? y.b : y.a;
+      if (A === B) continue;
+      const d1 = Math.hypot(shared.x - A.x, shared.y - A.y), d2 = Math.hypot(shared.x - B.x, shared.y - B.y);
+      if (d1 < 1 || d2 < 1) continue;
+      const angA = Math.atan2(shared.y - A.y, shared.x - A.x);
+      const angB = Math.atan2(B.y - shared.y, B.x - shared.x);
+      let dd = Math.abs(angA - angB);
+      if (dd > Math.PI) dd = Math.PI * 2 - dd;
+      if (dd > 0.26) continue; // 15° 이상 꺾이면 힌지로 둠
+      pistonAsm.push({ A, M: shared, B, f: d1 / (d1 + d2) });
+    }
+  }
+  // 피스톤 어셈블리 구성: 중간점을 공유하는 2개 유압 반쪽이 일직선이면 강직 연결 (꺾임 방지).
+  // 저장 없이 매 시뮬 시작 시 형상에서 도출 (이미 꺾인 힌지는 제외).
+  pistonAsm = [];
+  for (let i = 0; i < beams.length; i++) {
+    for (let j = i + 1; j < beams.length; j++) {
+      const x = beams[i], y = beams[j];
+      if (x.mat !== 'hyd' || y.mat !== 'hyd') continue;
+      const shared = [x.a, x.b].find(n => n === y.a || n === y.b);
+      if (!shared || shared.fixed) continue;
+      const A = (x.a === shared) ? x.b : x.a;
+      const B = (y.a === shared) ? y.b : y.a;
+      if (A === B) continue;
+      const d1 = Math.hypot(shared.x - A.x, shared.y - A.y), d2 = Math.hypot(shared.x - B.x, shared.y - B.y);
+      if (d1 < 1 || d2 < 1) continue;
+      const angA = Math.atan2(shared.y - A.y, shared.x - A.x);
+      const angB = Math.atan2(B.y - shared.y, B.x - shared.x);
+      let dd = Math.abs(angA - angB);
+      if (dd > Math.PI) dd = Math.PI * 2 - dd;
+      if (dd > 0.26) continue; // 15° 이상 꺾이면 힌지로 둠
+      pistonAsm.push({ A, M: shared, B, f: d1 / (d1 + d2) });
+    }
+  }
   for (const b of beams) { b.broken = false; b.strain = 0; }
   refreshMasses();
   hideOverlay(); sndClick();
