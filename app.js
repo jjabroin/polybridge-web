@@ -1087,35 +1087,35 @@ function drawSky() {
   sg.addColorStop(0, 'rgba(255,236,180,.9)'); sg.addColorStop(1, 'rgba(255,236,180,0)');
   ctx.fillStyle = sg; ctx.fillRect(930, -20, 300, 260);
   ctx.fillStyle = '#ffecb3'; ctx.beginPath(); ctx.arc(1080, 110, 34, 0, 7); ctx.fill();
-  // 구름
+  // 구름 (넓은 화면 커버)
   ctx.fillStyle = 'rgba(255,255,255,.10)';
   cloudT += 0.0016;
-  for (let i = 0; i < 5; i++) {
-    const cx = ((i * 340 + cloudT * 4000) % (W + 400)) - 200, cy = 70 + i * 36;
+  for (let i = 0; i < 8; i++) {
+    const cx = ((i * 700 + cloudT * 4000) % (W + 3000)) - 1500, cy = 60 + (i % 5) * 36;
     ctx.beginPath();
     ctx.ellipse(cx, cy, 70, 20, 0, 0, 7); ctx.ellipse(cx + 40, cy + 6, 50, 16, 0, 0, 7); ctx.ellipse(cx - 45, cy + 8, 44, 14, 0, 0, 7);
     ctx.fill();
   }
-  // 먼 산
+  // 먼 산 (줌아웃까지 커버)
   ctx.fillStyle = '#1b2f4b';
-  ctx.beginPath(); ctx.moveTo(0, 420);
-  for (let x = 0; x <= W; x += 80) ctx.lineTo(x, 330 + Math.sin(x * 0.008 + 2) * 40 + (x % 160 === 0 ? -30 : 0));
-  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-3000, 420);
+  for (let x = -3000; x <= W + 3000; x += 80) ctx.lineTo(x, 330 + Math.sin(x * 0.008 + 2) * 40 + (Math.abs(x) % 160 === 0 ? -30 : 0));
+  ctx.lineTo(W + 3000, H + 3000); ctx.lineTo(-3000, H + 3000); ctx.fill();
 }
 function drawTerrain(L) {
-  // 절벽 본체
+  // 절벽 본체 (줌아웃까지 이어짐 — 빈칸 없음)
   ctx.fillStyle = '#2c2118';
-  ctx.fillRect(0, L.roadY, L.left, H - L.roadY);
-  ctx.fillRect(L.right, L.roadY, W - L.right, H - L.roadY);
+  ctx.fillRect(-3000, L.roadY, L.left + 3000, H + 3000 - L.roadY);
+  ctx.fillRect(L.right, L.roadY, W + 3000 - L.right, H + 3000 - L.roadY);
   // 절벽 질감
   ctx.fillStyle = 'rgba(255,255,255,.05)';
-  for (let i = 0; i < 40; i++) {
-    const x = (i * 97) % W, y = L.roadY + 20 + (i * 53) % (H - L.roadY - 30);
+  for (let i = 0; i < 80; i++) {
+    const x = -1500 + (i * 97) % (W + 3000), y = L.roadY + 20 + (i * 53) % Math.max(60, (H - L.roadY - 30));
     if (x < L.left || x > L.right) ctx.fillRect(x, y, 26, 5);
   }
   if (L.island) {
     ctx.fillStyle = '#2c2118';
-    ctx.fillRect(L.island.x, L.island.top, L.island.w, H - L.island.top);
+    ctx.fillRect(L.island.x, L.island.top, L.island.w, H + 3000 - L.island.top);
   }
   // 절벽 모서리 모따기 콘크리트 (둥근 교대)
   ctx.fillStyle = '#78909c';
@@ -1144,9 +1144,9 @@ function drawWater(L) {
   const wg = ctx.createLinearGradient(0, L.waterY, 0, H);
   wg.addColorStop(0, 'rgba(41,121,189,.92)'); wg.addColorStop(1, 'rgba(13,43,77,.95)');
   ctx.fillStyle = wg;
-  ctx.beginPath(); ctx.moveTo(L.left, H); ctx.lineTo(L.left, L.waterY);
+  ctx.beginPath(); ctx.moveTo(L.left, H + 3000); ctx.lineTo(L.left, L.waterY);
   for (let x = L.left; x <= L.right; x += 16) ctx.lineTo(x, L.waterY + Math.sin(x * 0.05 + t * 2.4) * 5);
-  ctx.lineTo(L.right, H); ctx.fill();
+  ctx.lineTo(L.right, H + 3000); ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2; ctx.beginPath();
   for (let x = L.left; x <= L.right; x += 16) {
     const y = L.waterY + Math.sin(x * 0.05 + t * 2.4) * 5;
@@ -2035,6 +2035,8 @@ function boot() {  // roundRect 폴리필 (구형 브라우저/GitHub Pages 안�
     const params = new URLSearchParams(location.search);
     if (params.get('nohelp') === '1' || params.get('demo') === '1') $('help').classList.add('hidden');
     else if (!localStorage.getItem('pbw_seen')) $('help').classList.remove('hidden');
+    const zq = parseFloat(params.get('zoom'));
+    if (zq > 0) { cam.z = zq; clampCam(); updateZoomUI(); }
   } catch (e) {}
   try {
     if (new URLSearchParams(location.search).get('demo') === '1') {

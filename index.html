@@ -47,6 +47,22 @@
       <button id="btnRedo" title="Ctrl+Y">↪</button>
       <button id="btnClear" title="다리 전체 삭제">🗑</button>
     </div>
+    <h3>화면</h3>
+    <div id="zoomctl" title="확대/축소·위치">
+      <div class="zc-row">
+        <button id="zoomOut" title="축소">−</button>
+        <input type="range" id="zoomSlider" min="45" max="300" value="100">
+        <button id="zoomIn" title="확대">＋</button>
+        <button id="zoomFit" title="전체 보기">⤢</button>
+        <span id="zoomLabel">100%</span>
+      </div>
+      <div class="zc-row">
+        <span class="zc-ico" title="좌우 위치">↔</span>
+        <input type="range" id="panX" min="0" max="1000" value="500">
+        <span class="zc-ico" title="상하 위치">↕</span>
+        <input type="range" id="panY" min="0" max="1000" value="500">
+      </div>
+    </div>
   </aside>
 
   <!-- 우측: 차량 & 테스트 -->
@@ -89,21 +105,6 @@
   </footer>
 
   <!-- 줌/위치 컨트롤 -->
-  <div id="zoomctl" title="확대/축소·위치">
-    <div class="zc-row">
-      <button id="zoomOut" title="축소">−</button>
-      <input type="range" id="zoomSlider" min="45" max="300" value="100">
-      <button id="zoomIn" title="확대">＋</button>
-      <button id="zoomFit" title="전체 보기">⤢</button>
-      <span id="zoomLabel">100%</span>
-    </div>
-    <div class="zc-row">
-      <span class="zc-ico" title="좌우 위치">↔</span>
-      <input type="range" id="panX" min="0" max="1000" value="500">
-      <span class="zc-ico" title="상하 위치">↕</span>
-      <input type="range" id="panY" min="0" max="1000" value="500">
-    </div>
-  </div>
 
   <!-- 중앙 오버레이 -->
   <div id="overlay" class="hidden">
@@ -131,7 +132,7 @@
         <li><b>예산</b> — 120%까지는 테스트 가능(초과 시 ★ 감점). 상단 바가 빨개지면 주의! <b>∞ 자유 모드</b>는 예산 무제한 샌드박스입니다.</li>
         <li><b>주행 테스트</b> — <kbd>Space</kbd> 후 <b>🚗 자동차 출발</b> (<kbd>D</kbd>). 강체 차량이 다리를 건너 깃발에 닿으면 성공!</li>
         <li><b>도구</b> — <kbd>B</kbd> 놓기 · <kbd>M</kbd> 이동 · <kbd>E</kbd>/우클릭 지우기 · <kbd>V</kbd> 화면이동 · <kbd>Ctrl+Z</kbd> 되돌리기</li>
-        <li><b>화면 확대/축소·이동</b> — 마우스 휠, 우하단 슬라이더(줌 45%~300% + ↔↕ 위치). ⤢ 버튼은 전체 보기.</li>
+        <li><b>화면 확대/축소·이동</b> — 마우스 휠, 좌측 도구칸 슬라이더(줌 45%~300% + ↔↕ 위치). ⤢ 버튼은 전체 보기.</li>
       </ol>
       <h2>🏗 교량 구조 가이드</h2>
       <ol>
