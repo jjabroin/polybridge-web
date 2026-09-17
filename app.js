@@ -100,6 +100,7 @@ let stuckX = 0, stuckT = 0;
 let debris = [];       // 파단 잔해 (시뮬 전용)
 let hydPhase = 1.0;    // 유압 위상 (1.0 중립 ↔ 1.3 신장 / 0.7 수축)
 let simOverBudget = false;
+let simCost = 0; // 주행 시작 시점 비용 고정 (시뮬 중 기하학 변동에 흔들리지 않음)
 let flagWave = 0;
 
 const $ = id => document.getElementById(id);
@@ -770,14 +771,14 @@ function checkCarOutcome(dt) {
 }
 function win() {
   result = 'win';
-  const usage = totalCost() / LV().budget;
+  const usage = simCost / LV().budget;
   let stars = (brokenCount === 0 ? 1 : 0) + (usage < 0.8 ? 1 : 0) + (simTime < 25 ? 1 : 0);
   if (simOverBudget) stars = Math.min(stars, 2);
   sndWin();
   confetti();
   showOverlay(true, '🎉 레벨 클리어!', LV().desc, [
     ['⏱ 시간', simTime.toFixed(1) + 's'],
-    ['💰 비용', fmt$(totalCost())],
+    ['💰 비용', fmt$(simCost)],
     ['🧱 파손', brokenCount + '개'],
     ['⭐ 평가', '★'.repeat(Math.max(1, stars)) + '☆'.repeat(3 - Math.max(1, stars))],
   ]);
@@ -1365,7 +1366,7 @@ function defaultHint() {
     : '🚗 출발(D) 후 차량이 깃발에 닿으면 성공 · Space=건설로 복귀';
 }
 function updateHUD() {
-  const L = LV(), cost = totalCost();
+  const L = LV(), cost = mode === 'sim' ? simCost : totalCost();
   $('budgetText').textContent = fmt$(cost) + ' / ' + fmt$(L.budget);
   const pct = clamp(cost / L.budget * 100, 0, 100);
   const f = $('budgetFill');
@@ -1398,6 +1399,7 @@ function enterSim() {
   if (!roadExists) { toast('⚠️ 도로(Road) 상판이 없어요! 1번 자재로 길을 놓으세요'); sndFail(); return; }
   pushUndoSoft();
   buildSnap = serialize();
+  simCost = totalCost(); // 시작 예산 고정
   saveGame(true); // 설계안 자동 저장 (새로고침/이동 후에도 복원)
   mode = 'sim'; result = null; simTime = 0; dispatched = false;
   maxStrainSeen = 0; brokenCount = 0; bodies = []; car = null; particles = [];
@@ -1526,20 +1528,23 @@ function tryMoveNode(dn, x, y) {
 }
 function tryBuild(a, b) {
   const M = MATERIALS[curMat];
-  const len = Math.hypot(a.x - b.x, a.y - b.y);
-  if (len < M.minLen) { toast('너무 짧아요 (≥' + M.minLen + 'px)'); return; }
-  if (len > M.maxLen) { toast('너무 길어요! ' + M.name + ' 최대 ' + M.maxLen + 'px'); sndFail(); return; }
   pushUndo();
   let na = a.node, nb = b.node;
   let freshA = false, freshB = false;
   if (!na) { na = addNode(clamp(a.x, 0, W), clamp(a.y, 0, H), false, false); freshA = true; }
   if (!nb) { nb = addNode(clamp(b.x, 0, W), clamp(b.y, 0, H), false, false); freshB = true; }
-  if (na === nb) { if (freshA) nodes = nodes.filter(x => x !== na); refreshMasses(); updateHUD(); return; }
+  // 롤백: 이번 드래그의 모든 변경(노드 생성·분할 포함)을 스냅샷으로 원복
+  const rollback = () => {
+    const snap = undoStack.pop();
+    if (snap) deserialize(snap);
+    refreshMasses(); updateHUD();
+  };
+  if (na === nb) { rollback(); return; }
   // 새 노드가 기존 빔 위면 분할 → 구조 일체화
   if (freshA) splitBeamAt(na);
   if (freshB) splitBeamAt(nb);
-  // 새 빔이 기존 중간 노드를 지나면 자동 분할 (조인트 병합 — 긴 도로도 중간 받침과 연결됨)
-  const M0 = MATERIALS[curMat];
+  // 중간 부착: 드래그 경로상의 기존 조인트에서 자동 분할.
+  // 길이 검증은 전체가 아니라 토막별로 → 중간에 붙이면 자재 최대길이를 넘겨도 됨.
   const abx = nb.x - na.x, aby = nb.y - na.y;
   const L2 = abx * abx + aby * aby || 1;
   const pts = [];
@@ -1553,18 +1558,29 @@ function tryBuild(a, b) {
   }
   pts.sort((p, q) => p.t - q.t);
   const chain = [na, ...pts.map(p => p.n), nb];
-  let okSplit = chain.length > 2;
-  if (okSplit) for (let i = 0; i < chain.length - 1; i++) {
-    if (Math.hypot(chain[i].x - chain[i + 1].x, chain[i].y - chain[i + 1].y) < M0.minLen - 0.5) { okSplit = false; break; }
-  }
-  if (okSplit) {
-    for (let i = 0; i < chain.length - 1; i++) {
-      if (!beamExists(chain[i], chain[i + 1], curMat))
-        beams.push({ id: beamSeq++, a: chain[i], b: chain[i + 1], mat: curMat, rest: Math.hypot(chain[i].x - chain[i + 1].x, chain[i].y - chain[i + 1].y), broken: false, strain: 0 });
+  const segLens = [];
+  for (let i = 0; i < chain.length - 1; i++) segLens.push(Math.hypot(chain[i].x - chain[i + 1].x, chain[i].y - chain[i + 1].y));
+  if (chain.length > 2) {
+    const bad = segLens.findIndex(l => l < M.minLen - 0.5 || l > M.maxLen + 0.5);
+    if (bad >= 0) {
+      const l = segLens[bad];
+      toast(l < M.minLen ? '중간 조인트 간격이 너무 좁아요 (≥' + M.minLen + 'px)' : '토막이 너무 길어요! ' + M.name + ' 최대 ' + M.maxLen + 'px');
+      sndFail(); rollback(); return;
     }
+    let made = 0;
+    for (let i = 0; i < chain.length - 1; i++) {
+      if (!beamExists(chain[i], chain[i + 1], curMat)) {
+        beams.push({ id: beamSeq++, a: chain[i], b: chain[i + 1], mat: curMat, rest: segLens[i], broken: false, strain: 0 });
+        made++;
+      }
+    }
+    if (!made) { rollback(); return; }
   } else {
-    if (beamExists(na, nb, curMat)) { refreshMasses(); updateHUD(); return; }
-    beams.push({ id: beamSeq++, a: na, b: nb, mat: curMat, rest: Math.hypot(na.x - nb.x, na.y - nb.y), broken: false, strain: 0 });
+    const len = segLens[0];
+    if (len < M.minLen) { toast('너무 짧아요 (≥' + M.minLen + 'px)'); rollback(); return; }
+    if (len > M.maxLen) { toast('너무 길어요! ' + M.name + ' 최대 ' + M.maxLen + 'px'); sndFail(); rollback(); return; }
+    if (beamExists(na, nb, curMat)) { rollback(); return; }
+    beams.push({ id: beamSeq++, a: na, b: nb, mat: curMat, rest: len, broken: false, strain: 0 });
   }
   weldNodes();
   refreshMasses(); updateHUD(); sndClick(); autosaveSoon();
