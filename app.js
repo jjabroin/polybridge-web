@@ -75,6 +75,10 @@ const LEVELS = [
     desc: '경간 720px 최종 관문. 케이블 스테이 + 철강 트러스의 조합!',
     anchors: [[240,300],[960,300],[240,392],[960,392],[150,392],[1050,392],[240,190],[960,190],[150,190],[1050,190]],
     car: 'truck' },
+  { name: '∞ 자유 모드', roadY: 360, left: 200, right: 1080, waterY: 600, budget: Infinity, free: true,
+    desc: '예산 무제한 샌드박스! 온갖 다리를 마음껏 실험해보세요.',
+    anchors: [[200,360],[1080,360],[200,452],[1080,452],[200,544],[1080,544],[110,452],[1170,452],[200,268],[1080,268],[110,268],[1170,268],[110,360],[1170,360]],
+    car: 'light' },
 ];
 
 // ---------- 상태 ----------
@@ -837,7 +841,7 @@ function checkCarOutcome(dt) {
 }
 function win() {
   result = 'win';
-  const usage = simCost / LV().budget;
+  const usage = LV().free ? 0 : simCost / LV().budget;
   let stars = (brokenCount === 0 ? 1 : 0) + (usage < 0.8 ? 1 : 0) + (simTime < 25 ? 1 : 0);
   if (simOverBudget) stars = Math.min(stars, 2);
   sndWin();
@@ -1441,11 +1445,18 @@ function defaultHint() {
 }
 function updateHUD() {
   const L = LV(), cost = mode === 'sim' ? simCost : totalCost();
-  $('budgetText').textContent = fmt$(cost) + ' / ' + fmt$(L.budget);
-  const pct = clamp(cost / L.budget * 100, 0, 100);
-  const f = $('budgetFill');
-  f.style.width = pct + '%';
-  f.style.background = pct < 70 ? 'var(--acc)' : pct <= 100 ? 'var(--warn)' : 'var(--bad)';
+  if (L.free) {
+    $('budgetText').textContent = fmt$(cost) + ' / ∞ FREE';
+    const f = $('budgetFill');
+    f.style.width = '100%';
+    f.style.background = 'var(--steel)';
+  } else {
+    $('budgetText').textContent = fmt$(cost) + ' / ' + fmt$(L.budget);
+    const pct = clamp(cost / L.budget * 100, 0, 100);
+    const f = $('budgetFill');
+    f.style.width = pct + '%';
+    f.style.background = pct < 70 ? 'var(--acc)' : pct <= 100 ? 'var(--warn)' : 'var(--bad)';
+  }
   $('maxStrain').textContent = mode === 'sim' ? (maxStrainSeen * 100).toFixed(1) + '%' : '—';
   $('btnBuild').classList.toggle('active', mode === 'build');
   $('btnSim').classList.toggle('hidden', mode !== 'build');
@@ -1466,9 +1477,9 @@ function hideOverlay() { $('overlay').classList.add('hidden'); }
 // ---------- 모드 전환 ----------
 function enterSim() {
   if (mode === 'sim') return;
-  // 원작처럼 예산 초과분도 관대하게: 120%까지 테스트 허용 (초과 시 ★ 감점)
-  if (totalCost() > LV().budget * 1.2 + 1e-6) { toast('⚠️ 예산 20% 초과! 빔을 줄이거나 싼 자재로 바꾸세요'); sndFail(); return; }
-  const overBudget = totalCost() > LV().budget + 1e-6;
+  // 원작처럼 예산 초과분도 관대하게: 120%까지 테스트 허용 (초과 시 ★ 감점). 자유 모드는 무제한.
+  if (!LV().free && totalCost() > LV().budget * 1.2 + 1e-6) { toast('⚠️ 예산 20% 초과! 빔을 줄이거나 싼 자재로 바꾸세요'); sndFail(); return; }
+  const overBudget = !LV().free && totalCost() > LV().budget + 1e-6;
   const roadExists = beams.some(b => b.mat === 'road' && !b.broken);
   if (!roadExists) { toast('⚠️ 도로(Road) 상판이 없어요! 1번 자재로 길을 놓으세요'); sndFail(); return; }
   pushUndoSoft();
@@ -1784,7 +1795,7 @@ function bindUI() {
   const sel = $('levelSelect');
   LEVELS.forEach((L, i) => {
     const o = document.createElement('option');
-    o.value = String(i); o.textContent = L.name + ' · ' + fmt$(L.budget);
+    o.value = String(i); o.textContent = L.name + ' · ' + (L.free ? '∞' : fmt$(L.budget));
     sel.appendChild(o);
   });
   sel.onchange = () => setLevel(+sel.value);
