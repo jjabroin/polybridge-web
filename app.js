@@ -1618,12 +1618,13 @@ function tryBuild(a, b) {
   // 새 노드가 기존 빔 위면 분할 → 구조 일체화 (유압은 분할하지 않고 통째로 유지)
   if (freshA) splitBeamAt(na);
   if (freshB) splitBeamAt(nb);
-  // 유압 3점식: 양끝+중간 조인트 피스톤 1개로 생성 (분할 없음, 중간점 부착 가능)
+  // 유압 3점식: 양끝+중간 조인트 피스톤 1개로 생성 (분할 없음, 중간점 부착 가능).
+  // 중간점은 칼라 위치( A에서 62% )에 — 주황점이 곧 진짜 조인트.
   // 길이 검증은 반쪽 토막 기준 (중간 조인트를 거치면 전체가 최대길이를 넘어도 됨)
   if (curMat === 'hyd') {
     const total = Math.hypot(na.x - nb.x, na.y - nb.y);
-    if (total < 30) { toast('유압은 최소 30px 필요해요'); rollback(); return; }
-    const mx = (na.x + nb.x) / 2, my = (na.y + nb.y) / 2;
+    if (total < 40) { toast('유압은 최소 40px 필요해요'); rollback(); return; }
+    const mx = na.x + (nb.x - na.x) * 0.62, my = na.y + (nb.y - na.y) * 0.62;
     let mid = findNodeAt(mx, my, 12);
     if (mid === na || mid === nb) mid = null;
     if (mid) {
