@@ -170,7 +170,14 @@ function nodeMass(n) {
   return Math.max(0.6, m);
 }
 function refreshMasses() { for (const n of nodes) n.mass = nodeMass(n); seatLugs(); }
-// 유압 러그점 시팅: 칼라 위치(몸통 고정)에 고정. 편집 후 호출 (시뮬 중은 매 스텝 별도 처리).
+// 유압 러그 조회 (해당 빔의 칼라점)
+function hydLug(b) {
+  for (const n of nodes) {
+    const L = n.lug;
+    if (L && ((L.a === b.a && L.b === b.b) || (L.a === b.b && L.b === b.a))) return n;
+  }
+  return null;
+}
 function lugPoint(L) {
   const dx = L.b.x - L.a.x, dy = L.b.y - L.a.y;
   const d = Math.hypot(dx, dy) || 1e-6;
@@ -515,11 +522,17 @@ function pushBeamForce(beam, t, fy) {
 function physStep(dt) {
   simTime += dt;
   for (const b of beams) b.load = 0; // 횡하중 누적 초기화 (휨모멘트용)
-  // 유압 작동: 목표 길이로 애니메이션 (원작 ±50% 위상)
+  // 유압 작동: 목표 길이로 애니메이션 (원작 ±50% 위상).
+  // 수축 한계는 칼라 위치 정확히 (팁이 칼라에 닿고 멈춤 — 그 이상 수축 안 됨).
   if (hydPhase !== 1.0) {
     for (const b of beams) {
       if (b.mat !== 'hyd' || b.broken || !b.rest0) continue;
-      const tgt = b.rest0 * hydPhase;
+      let tgt;
+      if (hydPhase > 1) tgt = b.rest0 * hydPhase;
+      else {
+        const ln = hydLug(b);
+        tgt = ln ? ln.lug.len : b.rest0 * hydPhase;
+      }
       const dd = tgt - b.rest, step = 90 * dt * Math.sign(dd);
       b.rest = Math.abs(step) >= Math.abs(dd) ? tgt : b.rest + step;
     }
@@ -1154,7 +1167,7 @@ function toggleHyd() {
   if (mode !== 'sim') return;
   hydPhase = hydPhase === 1.5 ? 0.5 : 1.5;
   updateHydUI(); sndClick();
-  toast(hydPhase === 1.5 ? '🔧 유압 신장! (+50%)' : '🔧 유압 수축! (−50%)');
+  toast(hydPhase === 1.5 ? '🔧 유압 신장! (+50%)' : '🔧 유압 수축! (칼라까지)');
 }
 function updateHydUI() {
   const el = $('hydState');
@@ -1212,21 +1225,23 @@ function drawBeams() {
       }
       ctx.stroke();
     } else if (b.mat === 'hyd') {
-      // 유압 피스톤 통짜 1개: 실린더(A→칼라) + 로드(칼라→B) + 빨간 부착 3점
-      let cx = b.a.x + (b.b.x - b.a.x) * BARREL_FRAC, cy = b.a.y + (b.b.y - b.a.y) * BARREL_FRAC;
-      const lug = nodes.find(n => n.lug && ((n.lug.a === b.a && n.lug.b === b.b) || (n.lug.a === b.b && n.lug.b === b.a)));
-      if (lug) { cx = lug.x; cy = lug.y; }
+      // 유압 피스톤 통짜 1개: 실린더(밑동→칼라) + 로드(칼라→팁) + 주황 부착 3점
+      const ln = hydLug(b);
+      const base = ln ? ln.lug.a : b.a;
+      const tip = (ln && base === b.a) || !ln ? b.b : b.a;
+      const cx = ln ? ln.x : b.a.x + (b.b.x - b.a.x) * BARREL_FRAC;
+      const cy = ln ? ln.y : b.a.y + (b.b.y - b.a.y) * BARREL_FRAC;
       ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = M.thick + 3;
       ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
       ctx.strokeStyle = '#b25c00'; ctx.lineWidth = M.thick;
-      ctx.beginPath(); ctx.moveTo(b.a.x, b.a.y); ctx.lineTo(cx, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(cx, cy); ctx.stroke();
       ctx.strokeStyle = '#eceff1'; ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(b.b.x, b.b.y); ctx.stroke();
-      // 빨간 부착 3점 (양끝 + 칼라)
-      for (const [px, py] of [[b.a.x, b.a.y], [cx, cy], [b.b.x, b.b.y]]) {
-        ctx.fillStyle = '#e53935';
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(tip.x, tip.y); ctx.stroke();
+      // 주황 부착 3점 (양끝 + 칼라)
+      for (const [px, py] of [[base.x, base.y], [cx, cy], [tip.x, tip.y]]) {
+        ctx.fillStyle = '#ff8f00';
         ctx.beginPath(); ctx.arc(px, py, 6.5, 0, 7); ctx.fill();
-        ctx.fillStyle = '#ffebee';
+        ctx.fillStyle = '#fff3e0';
         ctx.beginPath(); ctx.arc(px, py, 2.5, 0, 7); ctx.fill();
       }
     } else if (b.mat === 'rroad') {
