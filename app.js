@@ -91,7 +91,7 @@ const CARS = {
   light: { name: '🚗 경차', w: 76, h: 20, wheelR: 15, mass: 10, motor: 800, top: 135, color: '#ff5252' },
   suv:   { name: '🚙 SUV',  w: 90, h: 24, wheelR: 17, mass: 15, motor: 1000, top: 125, color: '#26a69a' },
   truck: { name: '🚚 트럭', w: 112, h: 27, wheelR: 18, mass: 24, motor: 1250, top: 112, color: '#ffa000' },
-  sport: { name: '🏎️ 스포츠카', w: 78, h: 18, wheelR: 14, mass: 9, motor: 1100, top: 200, color: '#ab47bc' },
+  sport: { name: '🏎️ 스포츠카', w: 78, h: 18, wheelR: 14, mass: 9, motor: 1100, top: 200, accel: 2.4, color: '#ab47bc' },
 };
 const CAR_ORDER = ['light', 'suv', 'truck', 'sport'];
 
@@ -437,7 +437,7 @@ function spawnCar() {
     wheels: [-1, 1].map(s => ({
       ox: s * (spec.w / 2 - 18), oy: spec.h / 2 + 8,
       x: sx + s * (spec.w / 2 - 18), y: sy + spec.h / 2 + 8,
-      vx: 0, vy: 0, r: spec.wheelR, m: 2.2 * m, spin: 0, contact: false,
+      vx: 0, vy: 0, r: spec.wheelR, m: 2.2 * m, spin: 0, contact: false, ct: -9,
     })),
     // 짧고 단단한 서스펜션 (리지드 액슬에 근접 — 출렁임·데드존 없음)
     // D는 sqrt 스케일 (명시적 오일러 안정 한계 D·dt/m < 2 준수)
@@ -865,10 +865,11 @@ function stepCar(dt) {
   // 힐 어시스트: 기어오름·처짐 구간에서 저속이면 최대 2.5배 출력 (탈출용, 고속에선 정상).
   // 차체 전진 방향으로 구동 (오르막 감속·내리막 가속이 자연 발생).
   const grip = 1 + clamp((60 - car.vx) / 60, 0, 1) * 1.5;
-  const drive = 650 * car.m * clamp(1 - car.vx / car.spec.top, 0, 1) * grip;
+  const drive = 650 * car.m * (car.spec.accel || 1) * clamp(1 - car.vx / car.spec.top, 0, 1) * grip;
   const fxm = Math.cos(car.a), fym = Math.sin(car.a);
   for (const wh of car.wheels) {
-    if (wh.contact) {
+    // 접촉 유예: 미세 바운스로 접촉이 깜빡여도 0.12초간 구동 유지 (고속 덜컹거림 방지)
+    if (simTime - (wh.ct === undefined ? -9 : wh.ct) < 0.12) {
       car.vx += drive * 0.5 / car.m * dt * fxm;
       car.vy += drive * 0.5 / car.m * dt * fym;
       wh.vx += drive * 0.5 / wh.m * dt * 0.15 * fxm;
@@ -905,6 +906,7 @@ function collideCar(couple) {
     wh.x = tmp.x; wh.y = tmp.y; wh.vx = tmp.vx; wh.vy = tmp.vy;
     wh.contact = tmp.contact;
     if (tmp.contact) {
+      wh.ct = simTime;
       anyContact = true;
       car.contactT = simTime;
       wh.spin += car.vx * 0.004;
