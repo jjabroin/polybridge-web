@@ -77,7 +77,7 @@ const MATERIALS = {
   cable: { name: '케이블', en: 'CABLE', cost: 6.0, breakT: 0.44, breakC: -1e9, stiff: 0.55, wpp: 0.006, maxLen: 300, minLen: 15, thick: 3,  color: '#dfe6f2', key: '4', collideCar: false, noCollide: true, tensionOnly: true, buckLen: 0, yieldR: 0.8 },
   rope:  { name: '로프', en: 'ROPE',   cost: 3.7, breakT: 0.06, breakC: -1e9, stiff: 0.5,  wpp: 0.004, maxLen: 350, minLen: 15, thick: 2,  color: '#a1887f', key: '5', collideCar: false, noCollide: true, tensionOnly: true, buckLen: 0, yieldR: 0.8 },
   rroad: { name: '강화도로', en: 'ROAD+', cost: 5.5, breakT: 0.33, breakC: -0.20, stiff: 1.0,  wpp: 0.038, maxLen: 120, minLen: 15, thick: 12, color: '#41454f', key: '6', collideCar: true, buckLen: 60, yieldR: 0.9 },
-  spring:{ name: '스프링', en: 'SPRING', cost: 4.5, breakT: 0.30, breakC: -0.30, stiff: 0.15, wpp: 0.010, maxLen: 200, minLen: 15, thick: 4,  color: '#9ccc65', key: '7', collideCar: false, buckLen: 0, yieldR: 0.9 },
+  spring:{ name: '스프링', en: 'SPRING', cost: 4.5, breakT: 0.30, breakC: -0.30, stiff: 0.5, wpp: 0.010, maxLen: 200, minLen: 15, thick: 4,  color: '#9ccc65', key: '7', collideCar: false, buckLen: 0, yieldR: 0.9 },
   hyd:   { name: '유압', en: 'HYD',     cost: 12.5, breakT: 0.30, breakC: -0.18, stiff: 1.0,  wpp: 0.050, maxLen: 190, minLen: 15, thick: 9,  color: '#ff8f00', key: '8', collideCar: false, buckLen: 70, yieldR: 0.85 },
 };
 const MAT_ORDER = ['road', 'wood', 'steel', 'cable', 'rope', 'rroad', 'spring', 'hyd'];
@@ -145,6 +145,7 @@ let undoStack = [], redoStack = [];
 let mouse = { sx: 0, sy: 0, wx: 0, wy: 0, down: false, rdown: false, startNode: null, cur: null, hoverBeam: null, dragNode: null, moved: false };
 let loseTimer = 0, stuckTimer = 0, flipTimer = 0, goalTimer = 0;
 let stuckX = 0, stuckT = 0;
+let trampT = -9, trampF = 0; // 트램펄린 팔로우스루 상태 (분리 후에도 잠시 밀어줌)
 let debris = [];       // 파단 잔해 (시뮬 전용)
 let hydPhase = 1.0;    // 유압 위상 (1.0 중립 ↔ 1.5 신장 / 0.5 수축)
 let simOverBudget = false;
@@ -481,6 +482,15 @@ function pushBeamNodes(beam, t, ix, iy, posK, velK) {
   // 작용-반작용: 바퀴가 밀려난 반대 방향으로 빔을 민다 (빔이 차를 들어올리면 안 됨)
   pushBeamNodes2(beam.a, beam.b, t, ix, iy, posK, velK);
 }
+// 스프링 받침 도로 판정: 해당 도로 빔이 끊어지지 않은 스프링과 노드 공유
+function springSupported(b) {
+  if (b.mat !== 'road' && b.mat !== 'rroad') return false;
+  for (const x of beams) {
+    if (x.broken || x.mat !== 'spring') continue;
+    if (x.a === b.a || x.b === b.a || x.a === b.b || x.b === b.b) return true;
+  }
+  return false;
+}
 function pushBeamNodes2(P, Q, t, ix, iy, posK, velK) {
   // 노드/가상점 공용 위치 보정 (질량 가중, 고정 무시)
   const wP = P.fixed ? 0 : 1 / (P.mass || P.m || 1);
@@ -519,7 +529,7 @@ function stepSpringMids(dt) {
     if (b.broken || b.mat !== 'spring') continue;
     ensureSpringMid(b, false);
     const m = b.mid;
-    const vx = (m.x - m.px) * 0.97, vy = (m.y - m.py) * 0.97; // 댐핑
+    const vx = (m.x - m.px) * 0.995, vy = (m.y - m.py) * 0.995; // 댐핑 최소 (반발 보존) // 댐핑
     m.px = m.x; m.py = m.y;
     m.x += vx + (m.fx / m.m) * dt * dt;
     m.y += vy + (GRAV + m.fy / m.m) * dt * dt;
@@ -532,7 +542,7 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
   //       'cargo' = 케이블 제외 전부 충돌 (하중 시험용 공/상자)
   // SLOP: 정지 접촉을 유지해 떨림 없이 하중을 전달 (Z값 경계 호버 방지)
   const SLOP = 2.2;
-  let contact = false, hitBeam = null, ht = 0, hnx = 0, hny = -1, bestPen = -1e9;
+  let contact = false, hitBeam = null, ht = 0, hnx = 0, hny = -1, bestPen = -1e9, het = 0, hvn = 0;
   const segs = terrainSegs();
   for (const s of segs) {
     const c = circleSeg(x, y, r, s);
@@ -580,21 +590,32 @@ function collideCircleWorld(x, y, vx, vy, r, mass, out, mode) {
     if (bc.pen > 0) {
       const px = bc.nx * bc.pen, py = bc.ny * bc.pen;
       x += px; y += py;
-      const vn = vx * bc.nx + vy * bc.ny;
-      if (vn < 0) { vx -= bc.nx * vn; vy -= bc.ny * vn; vx *= 0.99; }
-      contact = true; hitBeam = b; ht = bt; hnx = bc.nx; hny = bc.ny;
+      // 움직이는 노면: 접촉점 표면 속도를 반영 (복원 중인 데크가 차를 밀어올림 — 트램펄린).
+      // 정지 노면은 기존과 동일 (표면속도 0).
+      const svx = (((1 - bc.t) * (bc.P.x - bc.P.px) + bc.t * (bc.Q.x - bc.Q.px))) / FIXED_DT;
+      const svy = (((1 - bc.t) * (bc.P.y - bc.P.py) + bc.t * (bc.Q.y - bc.Q.py))) / FIXED_DT;
+      const vn = (vx - svx) * bc.nx + (vy - svy) * bc.ny;
+      // 반발: 스프링 받침 도로는 트램펄린 (바퀴 한정, 착지급 충격만).
+      // 맨바닥은 묵직. 차↔스프링 직접 충돌은 없음 (도로 경유 원칙).
+      let e = 0.08;
+      if (mode === 'car' && isWheel && (b.mat === 'road' || b.mat === 'rroad') && vn < -120)
+        e = springSupported(b) ? 0.8 : 0.08;
+      if (vn < 0) { vx -= bc.nx * vn * (1 + e); vy -= bc.ny * vn * (1 + e); vx *= 0.99; }
+      contact = true; hitBeam = b; ht = bt; hnx = bc.nx; hny = bc.ny; het = e; hvn = vn;
       if (bc.pen > bestPen) bestPen = bc.pen;
       pushBeamNodes2(bc.P, bc.Q, bc.t, px, py, 0.22, 1.0);
     } else if (bc.pen > -SLOP) {
-      const vn = vx * bc.nx + vy * bc.ny;
+      const svx = (((1 - bc.t) * (bc.P.x - bc.P.px) + bc.t * (bc.Q.x - bc.Q.px))) / FIXED_DT;
+      const svy = (((1 - bc.t) * (bc.P.y - bc.P.py) + bc.t * (bc.Q.y - bc.Q.py))) / FIXED_DT;
+      const vn = (vx - svx) * bc.nx + (vy - svy) * bc.ny;
       if (vn < -5 && vn > -80) { vx -= bc.nx * vn; vy -= bc.ny * vn; }
       vx *= 0.999;
-      contact = true; hitBeam = b; ht = bt; hnx = bc.nx; hny = bc.ny;
+      contact = true; hitBeam = b; ht = bt; hnx = bc.nx; hny = bc.ny; het = 0; hvn = vn;
       if (bc.pen > bestPen) bestPen = bc.pen;
     }
   }
-  if (out) { out.x = x; out.y = y; out.vx = vx; out.vy = vy; out.contact = contact; out.beam = hitBeam; out.t = ht; out.nx = hnx; out.ny = hny; out.pen = bestPen; }
-  return out || { x, y, vx, vy, contact, beam: hitBeam, t: ht, nx: hnx, ny: hny, pen: bestPen };
+  if (out) { out.x = x; out.y = y; out.vx = vx; out.vy = vy; out.contact = contact; out.beam = hitBeam; out.t = ht; out.nx = hnx; out.ny = hny; out.pen = bestPen; out.e = het; out.vn = hvn; }
+  return out || { x, y, vx, vy, contact, beam: hitBeam, t: ht, nx: hnx, ny: hny, pen: bestPen, e: het, vn: hvn };
 }
 // 빔에 지속 하중(무게) 전달 — verlet 노드 힘 누적 (다음 스텝 적분에 반영)
 // 하중 분산 전달: 타이어 접촉 패치처럼 가장 가까운 빔 2개에 나눔.
@@ -662,10 +683,17 @@ function physStep(dt) {
     if (!L.b.fixed) { L.b.fx += n.fx * f; L.b.fy += n.fy * f; }
     n.fx = 0; n.fy = 0;
   }
+  // 스프링 연결 노드는 감쇠를 낮춰 통통 튐 (무하중 평형 복귀는 유지)
+  for (const n of nodes) n.springy = false;
+  for (const b of beams) {
+    if (b.broken || b.mat !== 'spring') continue;
+    b.a.springy = true; b.b.springy = true;
+  }
   // 1) 노드 적분 (Verlet) — 러그는 위치 지정식이므로 적분 제외
   for (const n of nodes) {    if (n.fixed) { n.px = n.x; n.py = n.y; continue; }
     if (n.lug) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; continue; }
-    const vx = (n.x - n.px) * 0.99, vy = (n.y - n.py) * 0.99;
+    const damp = n.springy ? 0.997 : 0.99;
+    const vx = (n.x - n.px) * damp, vy = (n.y - n.py) * damp;
     n.px = n.x; n.py = n.y;
     n.x += vx + (n.fx / n.mass) * dt * dt;
     n.y += vy + (GRAV + n.fy / n.mass) * dt * dt;
@@ -701,7 +729,7 @@ function physStep(dt) {
       springLink(b.a, m, b.rest / 2, st);
       springLink(m, b.b, b.rest / 2, st);
       const mx = (b.a.x + b.b.x) / 2, my = (b.a.y + b.b.y) / 2;
-      m.x += (mx - m.x) * 0.015; m.y += (my - m.y) * 0.015;
+      m.x += (mx - m.x) * 0.008; m.y += (my - m.y) * 0.008;
     }
     // 노드 지형 충돌 (절벽 위)
     for (const n of nodes) {
@@ -899,13 +927,14 @@ function stepCar(dt) {
 }
 function collideCar(couple) {
   const tmp = {};
-  let anyContact = false;
+  let anyContact = false, anyWheel = false;
   for (const wh of car.wheels) {
     collideCircleWorld(wh.x, wh.y, wh.vx, wh.vy, wh.r, wh.m, tmp, 'car');
     const wasAir = !wh.contact;
     wh.x = tmp.x; wh.y = tmp.y; wh.vx = tmp.vx; wh.vy = tmp.vy;
     wh.contact = tmp.contact;
     if (tmp.contact) {
+      anyWheel = true;
       wh.ct = simTime;
       anyContact = true;
       car.contactT = simTime;
@@ -913,6 +942,27 @@ function collideCar(couple) {
       wh.vx *= 0.998; // 구름 저항
       // 바퀴 하중을 노면에 분산 전달 (접촉 패치 — 스텝당 1회, 덜컹거림 방지)
       if (couple) spreadLoad(wh.x, wh.y, (wh.m + car.m * 0.25) * GRAV, true);
+      // 트램펄린 지속 반발: 받침 스프링 압축량의 자승에 비례해 차체를 밀어올림 (점진식 복원력).
+      // 정적으론 조용, 깊게 눌리면 발사. 착지 순간 킥과 합쳐짐. 차↔스프링 직접 충돌 없음.
+      if (couple && tmp.contact && tmp.beam && (tmp.beam.mat === 'road' || tmp.beam.mat === 'rroad')) {
+        let comp = 0;
+        for (const x of beams) {
+          if (x.broken || x.mat !== 'spring') continue;
+          if (x.a === tmp.beam.a || x.b === tmp.beam.a || x.a === tmp.beam.b || x.b === tmp.beam.b) {
+            comp += Math.max(0, x.rest - Math.hypot(x.b.x - x.a.x, x.b.y - x.a.y));
+          }
+        }
+        if (comp > 1) {
+          const f = Math.min(2000, comp * comp * 4);
+          car.vy -= f * FIXED_DT;
+          trampT = simTime; trampF = Math.min(4000, f);
+        }
+      }
+      // 착지 순간 킥: 강착지 반발을 차체에도 직접 전달 (강체 액슬 근사)
+      if (couple && tmp.contact && (tmp.e || 0) > 0.3 && (tmp.vn || 0) < -120) {
+        const kick = tmp.e * -tmp.vn * 1.2;
+        if (car.vy > -450) car.vy = Math.max(car.vy - kick, -450);
+      }
     }
     void wasAir;
   }
@@ -939,6 +989,12 @@ function collideCar(couple) {
     }
   }
   if (hits >= 2) { car.vx *= 0.985; car.va *= 0.94; }
+  // 트램펄린 팔로우스루: 분리 후 0.12초간 감쇠하며 밀어줘 완전한 포물선으로.
+  // (상승 중에만 — 추락 중이면 재접촉이 처리)
+  if (simTime - trampT < 0.12 && !anyWheel && car.vy < 0) {
+    const k = 1 - (simTime - trampT) / 0.12;
+    car.vy -= Math.min(4000, trampF) * k * FIXED_DT;
+  }
   // 접지 자세: 노면 경사를 따라가는 물리적 복원 토크 (바퀴 높이차 → 차체 회전).
   // 양쪽 접지 시 노면 기울기 목표, 한쪽만 닿으면 약한 수평 복원, 공중은 자유 회전.
   if (anyContact) {
@@ -1787,6 +1843,7 @@ function enterSim() {
   for (const n of nodes) { n.px = n.x; n.py = n.y; n.fx = 0; n.fy = 0; n.y0 = n.y; }
   for (const b of beams) { b.broken = false; b.strain = 0; b.rest0 = b.rest; b.yielded = false; b.dmg = 0; if (b.mat === 'spring') ensureSpringMid(b, true); }
   debris = []; hydPhase = 1.0; updateHydUI();
+  trampT = -9; trampF = 0;
   for (const b of beams) { b.broken = false; b.strain = 0; }
   refreshMasses();
   hideOverlay(); sndClick();
